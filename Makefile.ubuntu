@@ -1,0 +1,84 @@
+# Build ASTROIDS.PRG with the stock Ubuntu/Debian m68k-linux-gnu cross compiler instead of m68k-atari-mint-gcc.
+#
+#   sudo apt install gcc-m68k-linux-gnu binutils-m68k-linux-gnu mtools python3-pyelftools   (mtools only for the disk image)
+#   make -f Makefile.ubuntu              # build/ubuntu/ASTROIDS.PRG
+#   make -f Makefile.ubuntu disk-image   # build/ubuntu/asteroids-stfm.st
+#
+# The Linux-targeted compiler produces ELF with no leading underscore on symbols and no MiNT libc, so this
+# build adds a freestanding runtime (rt/: startup code, TOS calls, memory/string functions, 68000-safe
+# multiply and divide, a stdio replacement) and converts the linked ELF into a GEMDOS program with
+# tools/elf2prg.py. The game sources are not changed: the assembly files go through a sed that drops the
+# leading underscores. The same method is used by the Quanoid-atari-ST project.
+
+CROSS ?= m68k-linux-gnu-
+CC := $(CROSS)gcc
+LD := $(CROSS)ld
+OBJDUMP := $(CROSS)objdump
+PYTHON ?= python3
+
+PROJECT := ASTROIDS
+SRC_DIR := src
+INC_DIR := include
+RT_DIR := rt
+BUILD_DIR := build/ubuntu
+STACK_BYTES ?= 65536
+
+CFLAGS := -std=c99 -m68000 -mstrict-align -fno-store-merging -O2 -Wall -Wextra -Wno-missing-field-initializers -Werror \
+          -fomit-frame-pointer -ffreestanding -fno-pic -fno-pie -fno-asynchronous-unwind-tables -fno-stack-protector \
+          -fno-tree-loop-distribute-patterns -fno-delete-null-pointer-checks -Wno-array-bounds -U_FORTIFY_SOURCE -I$(RT_DIR)/include -I$(INC_DIR) -I$(BUILD_DIR) $(EXTRA_CFLAGS)
+ASFLAGS := -m68000 -DSTACK_BYTES=$(STACK_BYTES) -I$(BUILD_DIR)
+
+GAME_SRCS := main game platform_atari_st st_text sound
+GAME_ASMS := st_video st_ikbd st_rocks st_step
+OBJS := $(BUILD_DIR)/crt0.o \
+        $(GAME_SRCS:%=$(BUILD_DIR)/%.o) $(GAME_ASMS:%=$(BUILD_DIR)/%.o) \
+        $(BUILD_DIR)/sys.o $(BUILD_DIR)/math.o $(BUILD_DIR)/libc.o
+ASM_INC := $(BUILD_DIR)/asm_offsets.inc
+ELF := $(BUILD_DIR)/$(PROJECT).elf
+TARGET := $(BUILD_DIR)/$(PROJECT).PRG
+DISK_IMAGE := $(BUILD_DIR)/asteroids-stfm.st
+
+.PHONY: all disk-image clean
+all: $(TARGET)
+
+$(BUILD_DIR):
+	mkdir -p $(BUILD_DIR)
+
+$(BUILD_DIR)/%.o: $(SRC_DIR)/%.c | $(BUILD_DIR)
+	$(CC) $(CFLAGS) -DATARI_ST_TARGET -MMD -MP -c $< -o $@
+
+$(BUILD_DIR)/libc.o: $(RT_DIR)/libc.c | $(BUILD_DIR)
+	$(CC) $(CFLAGS) -c $< -o $@
+
+# byte offsets of GameState / GameAsteroid fields for the assembly, worked out by the compiler (see src/offsets.c)
+$(ASM_INC): $(SRC_DIR)/offsets.c $(INC_DIR)/game.h | $(BUILD_DIR)
+	$(CC) $(CFLAGS) -S $(SRC_DIR)/offsets.c -o - | sed -n 's/^->\([A-Za-z_0-9]*\) #\{0,1\}\(-\{0,1\}[0-9]*\).*/.set \1, \2/p' > $@
+
+# the game's assembly is written for a toolchain that puts an underscore in front of C names
+$(BUILD_DIR)/%.o: $(SRC_DIR)/%.S $(ASM_INC) | $(BUILD_DIR)
+	sed -E 's/(^|[^A-Za-z0-9_.\\%$$])_([A-Za-z])/\1\2/g' $< > $(BUILD_DIR)/$*.S
+	$(CC) $(ASFLAGS) -c $(BUILD_DIR)/$*.S -o $@
+
+$(BUILD_DIR)/%.o: $(RT_DIR)/%.S | $(BUILD_DIR)
+	$(CC) $(ASFLAGS) -c $< -o $@
+
+-include $(OBJS:.o=.d)
+
+$(ELF): $(OBJS) $(RT_DIR)/link.ld
+	$(LD) -T $(RT_DIR)/link.ld --emit-relocs --no-warn-rwx-segments -z noexecstack -Map $(BUILD_DIR)/$(PROJECT).map -o $@ $(OBJS)
+
+# the Linux-targeted compiler assumes a 68020 may read unaligned words; a 68000 takes an address error
+$(TARGET): $(ELF)
+	sh tools/checkalign.sh $<
+	$(PYTHON) tools/elf2prg.py $< $@
+
+$(DISK_IMAGE): $(TARGET)
+	rm -f $@
+	truncate -s 737280 $@
+	mformat -i $@ -f 720 -v ASTEROIDS ::
+	mcopy -i $@ $(TARGET) ::ASTROIDS.PRG
+
+disk-image: $(DISK_IMAGE)
+
+clean:
+	rm -rf $(BUILD_DIR)
