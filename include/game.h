@@ -27,7 +27,7 @@
 #define GAME_DRAW_CACHE_WORDS (3 + 6 * GAME_MAX_ASTEROID_POINTS)   /* room the platform may use per rock */
 #define GAME_MAX_POWERUPS 4
 #define GAME_MAX_ENEMIES 12
-#define GAME_MAX_ENEMY_BULLETS 16
+#define GAME_MAX_ENEMY_BULLETS 24
 #define GAME_STAR_COUNT 18
 #define GAME_FIX_SHIFT 16
 #define GAME_FIX_ONE (1L << GAME_FIX_SHIFT)
@@ -190,7 +190,7 @@ enum {
 };
 
 /* UFOs and the four kinds of alien. timer / timer2 / burst / flags are behaviour state that means
-   something different for each kind (flags: 1 = invisible, 2 = charging a teleport). */
+   something different for each kind (flags: 1 = invisible, 2 = charging a teleport, 4 = leaving for good). */
 typedef struct GameEnemy {
     int32_t x;
     int32_t y;
@@ -200,6 +200,11 @@ typedef struct GameEnemy {
     uint16_t age;
     int16_t timer;
     int16_t timer2;
+    int16_t warn;       /* frames of entry warning left: the enemy waits at the edge, harmless, until it reaches 0 */
+    int16_t charge;     /* blue sentinel: frames of teleport charge-up left (0 = not charging) */
+    int16_t tp_x;       /* blue sentinel: where it will reappear (world pixels) */
+    int16_t tp_y;
+    int16_t invis;      /* blue sentinel: frames of invisibility left */
     uint8_t active;
     uint8_t kind;
     uint8_t hp;
@@ -220,10 +225,16 @@ typedef struct GameBoss {
     uint16_t angle;
     int16_t timer;
     int16_t timer2;
+    int16_t dash_timer;  /* Boing ball: frames until its next dash (last stage only) */
+    int16_t dash_ticks;  /* Boing ball: frames of hovering left before it drops */
     uint8_t active;
     uint8_t kind;
     uint8_t entered;
     uint8_t flash;
+    uint8_t stage;       /* Boing ball: 0, 1 or 2 as it loses hit points */
+    uint8_t dash_state;  /* Boing ball: 0 bouncing, 1 hovering over the ship, 2 dropping */
+    uint8_t parity;      /* Boing ball: alternates the offset of its ring of bullets */
+    uint8_t stage_flash; /* Boing ball: frames it shows it has changed stage */
 } GameBoss;
 
 typedef struct GameHighScore {
@@ -254,6 +265,15 @@ typedef struct GameState {
     uint16_t frame;
     uint8_t wave;
     uint8_t lives;
+    uint8_t extra_life_count;   /* extra lives earned by score so far (the thresholds get further apart) */
+    uint8_t life_lost_this_wave;
+    uint8_t life_drops_this_wave;
+    uint8_t alien_budget;       /* aliens still to arrive this wave */
+    uint8_t wave_clear_timer;   /* frames of the "wave clear" pause left */
+    uint16_t clear_bonus;       /* bonus shown during that pause */
+    uint16_t drop_cooldown;     /* frames before the next power-up may drop */
+    uint16_t pity_timer;        /* frames since the last drop: long enough guarantees the next one */
+    uint16_t life_gap_timer;    /* frames since the last extra-life drop */
 
     GameShip ship;
     GameBullet bullets[GAME_MAX_BULLETS];
@@ -358,6 +378,9 @@ void st_update_bullets(GameState *state);
 /* reach: per rock size the largest 12.4 distance for a hit; returns the bullet index or -1, and the rock in *rock */
 long st_find_bullet_hit(const GameState *state, long first_bullet, const uint16_t *reach, long *rock);
 #endif
+
+/* For tests and tools: bring an enemy (GAME_ENEMY_*) in at once, without the entry warning. */
+void game_spawn_enemy_now(GameState *state, int kind);
 
 /* The shared outline `shape` (0 .. GAME_ROCK_SHAPES - 1) of a rock size: fills size, shape, point_count and radius. */
 void game_rock_shape(int size, int shape, GameAsteroid *out);

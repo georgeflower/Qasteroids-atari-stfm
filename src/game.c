@@ -34,18 +34,21 @@
 #define BULLET_RADIUS 1
 #define WAVE_BASE_ASTEROIDS 4
 #define WAVE_MAX_ASTEROIDS 20
-#define WAVE_SPAWN_MIN_DISTANCE 60           /* from the centre, so the ship starts safe */
+#define WAVE_SPAWN_MIN_DISTANCE 88           /* from the ship (Lovable: 220 of its 800x600 px) */
+#define WAVE_START_GRACE_FRAMES 50           /* 60 ticks @60 Hz of invulnerability when a wave starts */
+#define BOSS_START_GRACE_FRAMES 100          /* 120 ticks */
+#define WAVE_CLEAR_FRAMES 75                 /* 90 ticks: the pause after a wave */
+#define ALIEN_FIRST_EVENT_FRAMES 500         /* 600 ticks */
 #define SPEED_SCALE_STEP 13                  /* +5% per wave, 8.8 */
 #define SPEED_SCALE_MAX_WAVE 40
 #define NUDGE_SIN 2286                       /* sin(0.14 rad), Q14 */
 #define NUDGE_COS 16219                      /* cos(0.14 rad), Q14 */
 #define HYPERSPACE_SAFE_MARGIN 24            /* clear of every rock by this much (60 of Lovable's 800x600 px) */
 #define HYPERSPACE_ATTEMPTS 100
-#define MAX_LIVES 9
-#define POWERUP_LIFE_FRAMES 250              /* 300 frames @60 Hz */
-#define POWERUP_DROP_PERCENT 15
+#define MAX_LIVES 5
+#define POWERUP_LIFE_FRAMES 350              /* 420 ticks @60 Hz = 7 s */
 #define POWERUP_RADIUS 6
-#define SHIELD_FRAMES 250                    /* 300 @60 Hz */
+#define SHIELD_FRAMES 350                    /* 420 @60 Hz = 7 s (Lovable's solo shield) */
 #define RAPID_FIRE_FRAMES 500                /* 600 @60 Hz */
 #define MULTIPLIER_FRAMES 750                /* 900 @60 Hz */
 #define RAPID_FIRE_COOLDOWN 5                /* 100 ms */
@@ -164,6 +167,29 @@ static int within_radius(int32_t ax, int32_t ay, int32_t bx, int32_t by, int rad
         return 0;
     }
     return (mul16(dx, dx) + mul16(dy, dy)) < mul16(r, r);
+}
+
+/* Shortest signed distance a - b on a wrapping axis of the given size (world pixels). */
+static int torus_delta(int a, int b, int size) {
+    int d = a - b;
+
+    if (d > size / 2) {
+        d -= size;
+    } else if (d < -size / 2) {
+        d += size;
+    }
+    return d;
+}
+
+/* Distance without a square root: the longer side plus 3/8 of the shorter one (within 3% of the real thing). */
+static int approx_dist(int dx, int dy) {
+    if (dx < 0) {
+        dx = -dx;
+    }
+    if (dy < 0) {
+        dy = -dy;
+    }
+    return dx > dy ? dx + ((dy * 3) >> 3) : dy + ((dx * 3) >> 3);
 }
 
 /* World position (16.16) to screen coordinate; keeps 5 fractional bits so slow rocks move smoothly. */
@@ -323,12 +349,21 @@ static void start_boss(GameState *state);
 static void spawn_wave(GameState *state) {
     int count = WAVE_BASE_ASTEROIDS + 2 * state->wave;
     int index;
+    const int ship_x = (int) (state->ship.x >> GAME_FIX_SHIFT);
+    const int ship_y = (int) (state->ship.y >> GAME_FIX_SHIFT);
 
     memset(state->enemy_bullets, 0, sizeof(state->enemy_bullets));
-    state->alien_timer = (int16_t) (500 - state->wave * 17 > 250 ? 500 - state->wave * 17 : 250);
+    state->life_lost_this_wave = 0;
+    state->life_drops_this_wave = 0;
+    state->ship.hyperspace_cooldown = 0;
+    state->alien_timer = ALIEN_FIRST_EVENT_FRAMES;
+    state->alien_budget = (uint8_t) (2 + state->wave / 3 > 7 ? 7 : 2 + state->wave / 3);
     if (state->wave % 5 == 0) {
         /* every fifth wave is a boss fight: no rocks */
         start_boss(state);
+        if (state->ship.invulnerability < BOSS_START_GRACE_FRAMES) {
+            state->ship.invulnerability = BOSS_START_GRACE_FRAMES;
+        }
         emit(state, SFX_WAVE_START);
         return;
     }
@@ -337,18 +372,33 @@ static void spawn_wave(GameState *state) {
         count = WAVE_MAX_ASTEROIDS;
     }
 
+    /* the ship stays where it is, so the rocks are placed well away from it (the farthest of 100 tries at worst) */
     for (index = 0; index < count; ++index) {
         int retries;
+        int best_x = 0;
+        int best_y = 0;
+        int32_t best_distance = -1;
+
         for (retries = 0; retries < 100; ++retries) {
             const int x = game_rand_below(state, GAME_WORLD_WIDTH);
             const int y = game_rand_below(state, GAME_WORLD_HEIGHT);
-            const int dx = x - GAME_WORLD_WIDTH / 2;
-            const int dy = y - GAME_WORLD_HEIGHT / 2;
-            if (dx * dx + dy * dy > WAVE_SPAWN_MIN_DISTANCE * WAVE_SPAWN_MIN_DISTANCE) {
-                spawn_asteroid(state, GAME_ASTEROID_LARGE, (int32_t) x << GAME_FIX_SHIFT, (int32_t) y << GAME_FIX_SHIFT);
+            const int dx = torus_delta(x, ship_x, GAME_WORLD_WIDTH);
+            const int dy = torus_delta(y, ship_y, GAME_WORLD_HEIGHT);
+            const int32_t distance = (int32_t) dx * dx + (int32_t) dy * dy;
+
+            if (distance > best_distance) {
+                best_distance = distance;
+                best_x = x;
+                best_y = y;
+            }
+            if (distance >= (int32_t) WAVE_SPAWN_MIN_DISTANCE * WAVE_SPAWN_MIN_DISTANCE) {
                 break;
             }
         }
+        spawn_asteroid(state, GAME_ASTEROID_LARGE, (int32_t) best_x << GAME_FIX_SHIFT, (int32_t) best_y << GAME_FIX_SHIFT);
+    }
+    if (state->ship.invulnerability < WAVE_START_GRACE_FRAMES) {
+        state->ship.invulnerability = WAVE_START_GRACE_FRAMES;
     }
     state->banner_timer = BANNER_FRAMES;
     emit(state, SFX_WAVE_START);
@@ -363,16 +413,26 @@ static void split_asteroid(GameState *state, const GameAsteroid *asteroid) {
     spawn_asteroid(state, (uint8_t) (asteroid->size - 1), asteroid->x, asteroid->y);
 }
 
-/* Award points, and an extra life for every EXTRA_LIFE_INTERVAL crossed. */
-static void add_score(GameState *state, uint32_t points) {
-    state->score += (state->multiplier_timer > 0) ? points * 2u : points;
+/* Score needed for extra life number n (1, 2, 3 ...): 10000, 30000, 60000, 100000, 150000 ... */
+static uint32_t extra_life_threshold(unsigned n) {
+    return 5000u * n * (n + 1u);
+}
+
+/* Points that are not doubled by the score multiplier (the wave bonus), and the extra lives they earn. */
+static void add_score_plain(GameState *state, uint32_t points) {
+    state->score += points;
     while (state->score >= state->next_extra_life) {
+        ++state->extra_life_count;
         if (state->lives < MAX_LIVES) {
             ++state->lives;
             emit(state, SFX_EXTRA_LIFE);
         }
-        state->next_extra_life += GAME_EXTRA_LIFE_INTERVAL;
+        state->next_extra_life = extra_life_threshold((unsigned) state->extra_life_count + 1u);
     }
+}
+
+static void add_score(GameState *state, uint32_t points) {
+    add_score_plain(state, (state->multiplier_timer > 0) ? points * 2u : points);
 }
 
 /* Jump to a spot clear of every rock (Lovable's hyperspace), then recharge. */
@@ -608,13 +668,81 @@ static void spawn_powerup(GameState *state, int32_t x, int32_t y, int type) {
     }
 }
 
-static void maybe_drop_powerup(GameState *state, int32_t x, int32_t y) {
-    if (game_rand_below(state, 100) < POWERUP_DROP_PERCENT) {
-        spawn_powerup(state, x, y, game_rand_below(state, GAME_POWERUP_TYPES));
+/* Where a drop can come from, and how likely it is (Lovable's BALANCE.DROP_RATE). */
+enum {
+    DROP_ASTEROID_LARGE = 0,
+    DROP_ASTEROID_MEDIUM,
+    DROP_ASTEROID_SMALL,
+    DROP_UFO_LARGE,
+    DROP_UFO_SMALL,
+    DROP_ALIEN
+};
+static const uint8_t drop_percent[6] = {8, 4, 0, 30, 50, 25};
+static const uint8_t drop_weight[GAME_POWERUP_TYPES] = {40, 30, 0, 30};   /* shield, rapid fire, (extra life), score x2 */
+static const uint8_t boss_drop_weight[GAME_POWERUP_TYPES] = {35, 15, 35, 15};
+static const uint16_t pickup_points[GAME_POWERUP_TYPES] = {150, 150, 500, 200};
+#define DROP_MAX_ON_SCREEN 2
+#define DROP_COOLDOWN_FRAMES 250             /* 300 ticks: 5 s between drops */
+#define DROP_PITY_FRAMES 1500                /* 1800 ticks: 30 s without a drop guarantees the next */
+#define LIFE_DROP_MAX_LIVES 3                /* extra lives only drop when you are running low ... */
+#define LIFE_DROP_GAP_FRAMES 3000            /* ... at least 60 s apart ... */
+#define LIFE_DROP_MAX_PER_WAVE 1             /* ... and once a wave */
+#define LIFE_DROP_WEIGHT 6
+#define LIFE_DROP_WEIGHT_LOW 12              /* with one life left */
+
+static int pick_weighted(GameState *state, const int *weight, int count) {
+    int total = 0;
+    int pick;
+    int index;
+
+    for (index = 0; index < count; ++index) {
+        total += weight[index];
     }
+    pick = game_rand_below(state, total);
+    for (index = 0; index < count; ++index) {
+        if (pick < weight[index]) {
+            return index;
+        }
+        pick -= weight[index];
+    }
+    return 0;
+}
+
+static void maybe_drop_powerup(GameState *state, int32_t x, int32_t y, int source) {
+    int weight[GAME_POWERUP_TYPES];
+    int index;
+    int on_screen = 0;
+    int pity;
+
+    for (index = 0; index < GAME_MAX_POWERUPS; ++index) {
+        on_screen += state->powerups[index].active;
+    }
+    if (on_screen >= DROP_MAX_ON_SCREEN || state->drop_cooldown > 0) {
+        return;
+    }
+    pity = source != DROP_ASTEROID_SMALL && state->pity_timer >= DROP_PITY_FRAMES;
+    if (!pity && game_rand_below(state, 100) >= drop_percent[source]) {
+        return;
+    }
+    state->drop_cooldown = DROP_COOLDOWN_FRAMES;
+    state->pity_timer = 0;
+    for (index = 0; index < GAME_POWERUP_TYPES; ++index) {
+        weight[index] = drop_weight[index];
+    }
+    if (source != DROP_ASTEROID_SMALL && state->lives <= LIFE_DROP_MAX_LIVES &&
+        state->life_gap_timer >= LIFE_DROP_GAP_FRAMES && state->life_drops_this_wave < LIFE_DROP_MAX_PER_WAVE) {
+        weight[GAME_POWERUP_EXTRA_LIFE] = state->lives <= 1 ? LIFE_DROP_WEIGHT_LOW : LIFE_DROP_WEIGHT;
+    }
+    index = pick_weighted(state, weight, GAME_POWERUP_TYPES);
+    if (index == GAME_POWERUP_EXTRA_LIFE) {
+        state->life_gap_timer = 0;
+        ++state->life_drops_this_wave;
+    }
+    spawn_powerup(state, x, y, index);
 }
 
 static void collect_powerup(GameState *state, int type) {
+    add_score(state, pickup_points[type]);   /* a bonus for every pick-up (doubled while the score multiplier runs) */
     switch (type) {
     case GAME_POWERUP_SHIELD:
         state->shield_timer = SHIELD_FRAMES;
@@ -656,6 +784,15 @@ static void update_powerups(GameState *state) {
         }
     }
 
+    if (state->drop_cooldown > 0) {
+        --state->drop_cooldown;
+    }
+    if (state->pity_timer < 60000u) {
+        ++state->pity_timer;
+    }
+    if (state->life_gap_timer < 60000u) {
+        ++state->life_gap_timer;
+    }
     if (state->shield_timer > 0) {
         --state->shield_timer;
     }
@@ -727,9 +864,33 @@ static void lose_life(GameState *state);
 #define UFO_WAVE_STEP 375                    /* vertical wobble phase per frame (0.036 rad) */
 #define UFO_WOBBLE 37749L                    /* 1.2 */
 #define UFO_BULLET_SPEED 157286L             /* 5 */
-#define GREEN_BULLET_SPEED 188744L           /* 6 */
+#define GREEN_BULLET_SPEED 141557L           /* 4.5 (it was 6) */
 #define BLUE_BULLET_SPEED 110100L            /* 3.5 */
 #define ENEMY_BULLET_LIFE 50
+/* Green aliens (Lovable's BALANCE.GREEN, scaled to 50 Hz and the 320x240 world) */
+#define GREEN_BULLET_LIFE 47                 /* 56 ticks */
+#define GREEN_SCATTER_MIN 2295               /* 0.22 rad in 1/65536 turn */
+#define GREEN_SCATTER_BASE 3546              /* 0.34 rad */
+#define GREEN_SCATTER_PER_WAVE 68
+#define GREEN_FIRE_MIN 75
+#define GREEN_FIRE_BASE 117
+#define GREEN_FIRE_RAND 50
+#define GREEN_INITIAL_SHOOT_MIN 100
+#define GREEN_INITIAL_SHOOT_RAND 50
+#define GREEN_SCREEN_MARGIN 12
+#define GREEN_MAX_BULLETS 3
+#define GREEN_TELEGRAPH_FRAMES 17
+/* Blue sentinels */
+#define BLUE_TELEPORT_COOLDOWN 350
+#define BLUE_TELEPORT_RAND 150
+#define BLUE_CHARGE_FRAMES 38
+#define BLUE_EDGE_MARGIN 20
+#define BLUE_MIN_SHIP_DISTANCE 88
+#define BLUE_DEST_TRIES 20
+#define BLUE_ARRIVE_NO_FIRE 50
+#define BLUE_BURST_GAP 150
+#define BLUE_BURST_GAP_RAND 50
+#define BLUE_LIFETIME_FRAMES 1500
 #define ENEMY_MARGIN 30                      /* how far off the field an enemy may wander before it is gone */
 #define BOSS_ENTER_SPEED 24000L              /* 0.8 px per 60 Hz frame */
 #define BOSS_HIT_FLASH 10
@@ -844,25 +1005,81 @@ static int count_enemies(const GameState *state, uint8_t kind) {
     return count;
 }
 
-static void spawn_ufo(GameState *state) {
-    const int from_left = game_rand_below(state, 2);
-    const uint8_t kind = (state->wave > 6 && game_rand_below(state, 2)) ? ENEMY_UFO_SMALL : ENEMY_UFO_LARGE;
-    const int32_t speed = UFO_SPEED_MIN + game_rand_below(state, UFO_SPEED_SPREAD);
-    GameEnemy *ufo = spawn_enemy(state, kind, from_left ? 0 : ((int32_t) GAME_WORLD_WIDTH << GAME_FIX_SHIFT),
-                                 (int32_t) (20 + game_rand_below(state, GAME_WORLD_HEIGHT - 40)) << GAME_FIX_SHIFT,
-                                 from_left ? speed : -speed, 0);
+/* ---- how enemies arrive: a warning arrow at the edge, then the enemy flies in ---- */
 
+#define ENTRY_WARN_FRAMES 100                /* 120 ticks @60 Hz */
+#define ENTRY_WARN_BLINK_FRAMES 25           /* the arrow blinks for the last 30 ticks */
+#define ENTRY_GUARD_EDGE 40                  /* a ship this close to the entry edge ... */
+#define ENTRY_GUARD_Y 32                     /* ... and this close to the entry height is in the way */
+#define ENTRY_GUARD_TRIES 10
+
+/* Which edge and height an enemy (or a group `extent` pixels tall) enters at: not right beside a parked ship. */
+static void choose_entry(GameState *state, int margin, int extent, int *from_left, int *y) {
+    const int ship_x = (int) (state->ship.x >> GAME_FIX_SHIFT);
+    const int ship_y = (int) (state->ship.y >> GAME_FIX_SHIFT);
+    int tries;
+    int left = game_rand_below(state, 2);
+
+    *y = margin + game_rand_below(state, GAME_WORLD_HEIGHT - 2 * margin);
+    for (tries = 0; tries < ENTRY_GUARD_TRIES; ++tries) {
+        const int edge_gap = left ? ship_x : GAME_WORLD_WIDTH - ship_x;
+        const int dy = torus_delta(ship_y, *y, GAME_WORLD_HEIGHT);
+
+        if (edge_gap >= ENTRY_GUARD_EDGE || (dy < 0 ? -dy : dy) >= ENTRY_GUARD_Y + extent) {
+            break;
+        }
+        *y = margin + game_rand_below(state, GAME_WORLD_HEIGHT - 2 * margin);
+    }
+    {
+        const int edge_gap = left ? ship_x : GAME_WORLD_WIDTH - ship_x;
+        const int dy = torus_delta(ship_y, *y, GAME_WORLD_HEIGHT);
+
+        if (edge_gap < ENTRY_GUARD_EDGE && (dy < 0 ? -dy : dy) < ENTRY_GUARD_Y + extent) {
+            left = !left;   /* still in the way: come in from the other side */
+        }
+    }
+    *from_left = left;
+}
+
+static int count_ufos(const GameState *state) {
+    int index;
+    int count = 0;
+
+    for (index = 0; index < GAME_MAX_ENEMIES; ++index) {
+        const GameEnemy *enemy = &state->enemies[index];
+        count += (enemy->active && (enemy->kind == ENEMY_UFO_LARGE || enemy->kind == ENEMY_UFO_SMALL));
+    }
+    return count;
+}
+
+static void spawn_ufo(GameState *state) {
+    int from_left;
+    int y;
+    const uint8_t kind = (state->wave > 9 && game_rand_below(state, 100) < 35) ? ENEMY_UFO_SMALL : ENEMY_UFO_LARGE;
+    const int32_t speed = UFO_SPEED_MIN + game_rand_below(state, UFO_SPEED_SPREAD);
+    GameEnemy *ufo;
+
+    choose_entry(state, 20, 0, &from_left, &y);
+    ufo = spawn_enemy(state, kind, from_left ? 0 : ((int32_t) GAME_WORLD_WIDTH << GAME_FIX_SHIFT),
+                      (int32_t) y << GAME_FIX_SHIFT, from_left ? speed : -speed, 0);
     if (ufo != NULL) {
         ufo->timer = (int16_t) (50 + game_rand_below(state, 50));
+        ufo->warn = ENTRY_WARN_FRAMES;
     }
 }
 
 static void spawn_alien(GameState *state, uint8_t kind) {
-    const int from_left = game_rand_below(state, 2);
-    const int32_t x = (int32_t) (from_left ? ENEMY_ENTER_LEFT : ENEMY_ENTER_RIGHT) << GAME_FIX_SHIFT;
-    const int32_t y = (int32_t) (12 + game_rand_below(state, GAME_WORLD_HEIGHT - 24)) << GAME_FIX_SHIFT;
-    const int32_t direction = from_left ? 1 : -1;
+    int from_left;
+    int y_px;
+    int32_t x;
+    int32_t y;
+    int32_t direction;
     GameEnemy *alien;
+
+    choose_entry(state, 12, 0, &from_left, &y_px);
+    x = (int32_t) (from_left ? ENEMY_ENTER_LEFT : ENEMY_ENTER_RIGHT) << GAME_FIX_SHIFT;
+    y = (int32_t) y_px << GAME_FIX_SHIFT;
+    direction = from_left ? 1 : -1;
 
     switch (kind) {
     case ENEMY_BROWN:
@@ -872,7 +1089,7 @@ static void spawn_alien(GameState *state, uint8_t kind) {
         const int32_t speed = 25166L + game_rand_below(state, 12583);
         alien = spawn_enemy(state, kind, x, y, direction * speed, (int32_t) (game_rand_below(state, 1000) - 500) * speed / 2000);
         if (alien != NULL) {
-            alien->timer = (int16_t) (75 + game_rand_below(state, 50));
+            alien->timer = (int16_t) (GREEN_INITIAL_SHOOT_MIN + game_rand_below(state, GREEN_INITIAL_SHOOT_RAND));
         }
         break;
     }
@@ -880,22 +1097,29 @@ static void spawn_alien(GameState *state, uint8_t kind) {
         alien = spawn_enemy(state, kind, x, y, direction * 15729L, 0);
         if (alien != NULL) {
             alien->timer = (int16_t) (50 + game_rand_below(state, 33));
-            alien->timer2 = (int16_t) (75 + game_rand_below(state, 50));   /* until the first teleport */
+            alien->timer2 = (int16_t) (BLUE_TELEPORT_COOLDOWN + game_rand_below(state, BLUE_TELEPORT_RAND));   /* until the first teleport */
         }
         break;
     default:
         alien = NULL;
         break;
     }
-    (void) alien;
+    if (alien != NULL) {
+        alien->warn = ENTRY_WARN_FRAMES;
+    }
 }
 
 static void spawn_swarm(GameState *state) {
-    const int from_left = game_rand_below(state, 2);
-    const int32_t x = (int32_t) (from_left ? ENEMY_ENTER_LEFT : ENEMY_ENTER_RIGHT) << GAME_FIX_SHIFT;
-    const int32_t base_y = (int32_t) (24 + game_rand_below(state, GAME_WORLD_HEIGHT - 48)) << GAME_FIX_SHIFT;
+    int from_left;
+    int y_px;
+    int32_t x;
+    int32_t base_y;
     const uint8_t flock = (uint8_t) (1 + game_rand_below(state, 250));
     int member;
+
+    choose_entry(state, 24, 10, &from_left, &y_px);
+    x = (int32_t) (from_left ? ENEMY_ENTER_LEFT : ENEMY_ENTER_RIGHT) << GAME_FIX_SHIFT;
+    base_y = (int32_t) y_px << GAME_FIX_SHIFT;
 
     for (member = 0; member < 3; ++member) {
         const int32_t speed = 12583L + game_rand_below(state, 9437);
@@ -903,14 +1127,42 @@ static void spawn_swarm(GameState *state) {
                                        from_left ? speed : -speed, (int32_t) game_rand_below(state, 31457) - 15729);
         if (alien != NULL) {
             alien->flock = flock;
+            alien->warn = ENTRY_WARN_FRAMES;
         }
+    }
+}
+
+/* For tests and tools: bring an enemy of the given kind in at once, without the entry warning. */
+void game_spawn_enemy_now(GameState *state, int kind) {
+    int index;
+
+    switch (kind) {
+    case ENEMY_UFO_LARGE:
+    case ENEMY_UFO_SMALL: {
+        GameEnemy *ufo = spawn_enemy(state, (uint8_t) kind, 0, (int32_t) (GAME_WORLD_HEIGHT / 2) << GAME_FIX_SHIFT, UFO_SPEED_MIN, 0);
+
+        if (ufo != NULL) {
+            ufo->timer = 60;
+        }
+        break;
+    }
+    case ENEMY_PURPLE:
+        spawn_swarm(state);
+        break;
+    default:
+        spawn_alien(state, (uint8_t) kind);
+        break;
+    }
+    for (index = 0; index < GAME_MAX_ENEMIES; ++index) {
+        state->enemies[index].warn = 0;
     }
 }
 
 static void kill_enemy(GameState *state, GameEnemy *enemy) {
     add_score(state, enemy_points_table[enemy->kind]);
     emit(state, SFX_EXPLODE_MEDIUM);
-    maybe_drop_powerup(state, enemy->x, enemy->y);
+    maybe_drop_powerup(state, enemy->x, enemy->y,
+                       enemy->kind == ENEMY_UFO_LARGE ? DROP_UFO_LARGE : enemy->kind == ENEMY_UFO_SMALL ? DROP_UFO_SMALL : DROP_ALIEN);
     enemy->active = 0;
 }
 
@@ -925,6 +1177,10 @@ static void update_enemy(GameState *state, GameEnemy *enemy) {
     int32_t speed;
     int32_t max_speed;
 
+    if (enemy->warn > 0) {   /* still being announced at the edge: nothing moves, nothing can be hit */
+        --enemy->warn;
+        return;
+    }
     ++enemy->age;
     enemy->phase = (uint16_t) (enemy->phase + 626);   /* 0.05 rad per 60 Hz frame */
 
@@ -935,7 +1191,8 @@ static void update_enemy(GameState *state, GameEnemy *enemy) {
         if (--enemy->timer <= 0) {
             enemy->timer = (int16_t) (50 + game_rand_below(state, 50));
             if (enemy->kind == ENEMY_UFO_SMALL) {
-                aim_enemy_bullet(state, enemy->x, enemy->y, UFO_BULLET_SPEED, 0, GAME_COLOR_RED, ENEMY_BULLET_LIFE);
+                aim_enemy_bullet(state, enemy->x, enemy->y, UFO_BULLET_SPEED, (uint16_t) (game_rand_below(state, 2505) - 1252),
+                                 GAME_COLOR_RED, ENEMY_BULLET_LIFE);   /* +-0.12 rad */
             } else {
                 const uint16_t heading = game_rand16(state);
                 fire_enemy_bullet(state, enemy->x, enemy->y, trig_mul(UFO_BULLET_SPEED, trig_cos(heading)),
@@ -960,27 +1217,53 @@ static void update_enemy(GameState *state, GameEnemy *enemy) {
         }
         break;
 
-    case ENEMY_GREEN:
+    case ENEMY_GREEN: {
+        const int x_px = (int) (enemy->x >> GAME_FIX_SHIFT);
+        int live_shots = 0;
+        int can_fire;
+        int shot;
+
         enemy->vx -= (enemy->vx / 256) * SHIP_DRAG_NUMERATOR;
         enemy->vy += trig_mul(755, trig_sin(enemy->phase));
-        if (--enemy->timer <= 0) {
-            const int wave_bonus = state->wave * 2;
-            enemy->timer = (int16_t) ((67 - wave_bonus > 33 ? 67 - wave_bonus : 33) + game_rand_below(state, 33));
-            aim_enemy_bullet(state, enemy->x, enemy->y, GREEN_BULLET_SPEED, (uint16_t) (game_rand_below(state, 3651) - 1826),
-                             GAME_COLOR_SHIP, ENEMY_BULLET_LIFE);
+        for (shot = 0; shot < GAME_MAX_ENEMY_BULLETS; ++shot) {
+            live_shots += (state->enemy_bullets[shot].active && state->enemy_bullets[shot].color == GAME_COLOR_SHIP);
+        }
+        can_fire = x_px >= GREEN_SCREEN_MARGIN && x_px <= GAME_WORLD_WIDTH - GREEN_SCREEN_MARGIN &&
+                   live_shots < GREEN_MAX_BULLETS * count_enemies(state, ENEMY_GREEN);
+        /* the timer waits at 1 while the alien cannot fire, so the warning flash stays honest */
+        if (enemy->timer > 1 || can_fire) {
+            --enemy->timer;
+        }
+        if (enemy->timer <= 0 && can_fire) {
+            const int wave_cut = (state->wave * 5) / 3;
+            const int scatter_cut = state->wave * GREEN_SCATTER_PER_WAVE;
+            const int scatter = GREEN_SCATTER_BASE - scatter_cut > GREEN_SCATTER_MIN ? GREEN_SCATTER_BASE - scatter_cut : GREEN_SCATTER_MIN;
+
+            enemy->timer = (int16_t) ((GREEN_FIRE_BASE - wave_cut > GREEN_FIRE_MIN ? GREEN_FIRE_BASE - wave_cut : GREEN_FIRE_MIN) +
+                                      game_rand_below(state, GREEN_FIRE_RAND));
+            aim_enemy_bullet(state, enemy->x, enemy->y, GREEN_BULLET_SPEED,
+                             (uint16_t) (game_rand_below(state, 2 * scatter + 1) - scatter), GAME_COLOR_SHIP, GREEN_BULLET_LIFE);
         }
         break;
+    }
 
     case ENEMY_BLUE:
+        /* flags: 1 invisible after a burst, 2 charging a teleport, 4 leaving for good */
+        if (enemy->age >= BLUE_LIFETIME_FRAMES && !(enemy->flags & 4)) {
+            enemy->flags |= 4;
+            enemy->timer2 = 0;
+        }
+        if (enemy->timer2 > 0) {
+            --enemy->timer2;
+        }
         enemy->vx -= (enemy->vx / 256) * 13;   /* x0.95 */
         enemy->vy -= (enemy->vy / 256) * 13;
-        if (enemy->flags & 1) {                                  /* invisible after a burst */
-            if (--enemy->timer2 <= 0) {
+        if (enemy->flags & 1) {
+            if (--enemy->invis <= 0) {
                 enemy->flags &= (uint8_t) ~1u;
-                enemy->timer2 = (int16_t) (75 + game_rand_below(state, 50));
             }
         } else {
-            if (enemy->burst < 3 && --enemy->timer <= 0) {
+            if (--enemy->timer <= 0) {
                 const uint16_t spread = (uint16_t) ((int) (enemy->burst - 1) * 1640);   /* +-0.15 rad */
 
                 ++enemy->burst;
@@ -989,22 +1272,51 @@ static void update_enemy(GameState *state, GameEnemy *enemy) {
                                  ENEMY_BULLET_LIFE);
                 if (enemy->burst >= 3) {
                     enemy->burst = 0;
-                    enemy->timer = (int16_t) (100 + game_rand_below(state, 50));
+                    enemy->timer = (int16_t) (BLUE_BURST_GAP + game_rand_below(state, BLUE_BURST_GAP_RAND));
                     enemy->flags |= 1;
-                    enemy->timer2 = 50;
+                    enemy->invis = 50;
                 }
             }
-            if (enemy->timer2 > 0 && !(enemy->flags & 2) && --enemy->timer2 <= 0) {
-                enemy->flags |= 2;        /* charging up to teleport */
-                enemy->timer2 = 25;
-            } else if (enemy->flags & 2) {
+            if (enemy->timer2 <= 0 && enemy->charge <= 0) {
+                /* start charging, and choose now where to appear: far from the ship, so it can be shown */
+                const int ship_x = (int) (state->ship.x >> GAME_FIX_SHIFT);
+                const int ship_y = (int) (state->ship.y >> GAME_FIX_SHIFT);
+                int32_t best_distance = -1;
+                int attempt;
+
+                enemy->charge = BLUE_CHARGE_FRAMES;
+                for (attempt = 0; attempt < BLUE_DEST_TRIES; ++attempt) {
+                    const int x = BLUE_EDGE_MARGIN + game_rand_below(state, GAME_WORLD_WIDTH - 2 * BLUE_EDGE_MARGIN);
+                    const int y = BLUE_EDGE_MARGIN + game_rand_below(state, GAME_WORLD_HEIGHT - 2 * BLUE_EDGE_MARGIN);
+                    const int32_t distance = (int32_t) (x - ship_x) * (x - ship_x) + (int32_t) (y - ship_y) * (y - ship_y);
+
+                    if (distance > best_distance) {
+                        best_distance = distance;
+                        enemy->tp_x = (int16_t) x;
+                        enemy->tp_y = (int16_t) y;
+                    }
+                    if (distance >= BLUE_MIN_SHIP_DISTANCE * BLUE_MIN_SHIP_DISTANCE) {
+                        break;
+                    }
+                }
+                emit(state, SFX_HYPERSPACE);
+            }
+            if (enemy->charge > 0) {
+                enemy->flags |= 2;
                 enemy->vx = 0;
                 enemy->vy = 0;
-                if (--enemy->timer2 <= 0) {
-                    enemy->x = (int32_t) (20 + game_rand_below(state, GAME_WORLD_WIDTH - 40)) << GAME_FIX_SHIFT;
-                    enemy->y = (int32_t) (20 + game_rand_below(state, GAME_WORLD_HEIGHT - 40)) << GAME_FIX_SHIFT;
+                if (--enemy->charge <= 0) {
                     enemy->flags &= (uint8_t) ~2u;
-                    enemy->timer2 = (int16_t) (170 + game_rand_below(state, 100));
+                    if (enemy->flags & 4) {
+                        enemy->active = 0;   /* it has had its time: it teleports away for good */
+                        return;
+                    }
+                    enemy->x = (int32_t) enemy->tp_x << GAME_FIX_SHIFT;
+                    enemy->y = (int32_t) enemy->tp_y << GAME_FIX_SHIFT;
+                    enemy->timer2 = (int16_t) (BLUE_TELEPORT_COOLDOWN + game_rand_below(state, BLUE_TELEPORT_RAND));
+                    if (enemy->timer < BLUE_ARRIVE_NO_FIRE) {
+                        enemy->timer = BLUE_ARRIVE_NO_FIRE;
+                    }
                     emit(state, SFX_HYPERSPACE);
                 }
             }
@@ -1095,6 +1407,40 @@ static void update_enemy_bullets(GameState *state) {
 
 /* ---- bosses (waves 5, 10, 15, 20, ...: Amiga ball, flying saucer, tentacle, Borg cube) ---- */
 
+/* The Boing ball (Lovable's BALANCE.AMIGA, scaled to 50 Hz and the 320x240 world: one old px/tick is 31457 here) */
+#define BALL_FLOOR_Y 208L
+#define BALL_CEILING_Y 16L
+#define BALL_WALL_LEFT 24L
+#define BALL_WALL_RIGHT 296L
+#define BALL_GRAVITY 3775L
+#define BALL_SPEED_X_BASE 1600               /* 1.6 px/tick, in 1/1000 */
+#define BALL_SPEED_X_PER_WAVE 60
+#define BALL_SPEED_X_MAX 141557L
+#define BALL_STAGE_HP_1 66                   /* percent of its hit points where stage 1 starts */
+#define BALL_STAGE_HP_2 40
+#define BALL_BURST_MIN 50
+#define BALL_VOLLEY_SPREAD 2185              /* 12 degrees in 1/65536 turn */
+#define BALL_SLAM_Y 220L
+#define BALL_BULLET_LIFE 125
+#define BALL_DASH_MIN 250
+#define BALL_DASH_RAND 101
+#define BALL_DASH_HOVER 63
+#define BALL_DASH_LOCK 25
+#define BALL_DASH_FIRST 75
+#define BALL_DASH_TRACK 47185L
+#define BALL_DASH_DROP 346027L
+#define BALL_SPIN 626
+static const int32_t ball_bounce_vy[3] = {251658L, 283115L, 308281L};     /* 8.0, 9.0, 9.8 */
+static const uint8_t ball_speed_mul[3] = {100, 120, 145};
+static const uint8_t ball_turn_percent[3] = {0, 30, 50};
+static const uint8_t ball_burst_count[3] = {8, 10, 12};
+static const int32_t ball_burst_speed[3] = {62914L, 69206L, 75497L};     /* 2.0, 2.2, 2.4 */
+static const uint8_t ball_burst_mul[3] = {100, 80, 65};
+static const uint8_t ball_slam_per_side[3] = {1, 1, 2};
+static const int32_t ball_slam_speed[3] = {110100L, 125829L, 141557L};   /* 3.5, 4.0, 4.5 */
+static const uint8_t ball_volley_count[3] = {0, 3, 5};
+static const int32_t ball_volley_speed[3] = {0L, 94372L, 106954L};       /* 3.0, 3.4 */
+
 static void start_boss(GameState *state) {
     GameBoss *boss = &state->boss;
     const int kind = 1 + (state->wave / 5 - 1) % 4;
@@ -1105,16 +1451,18 @@ static void start_boss(GameState *state) {
     boss->kind = (uint8_t) kind;
     boss->x = ((int32_t) GAME_WORLD_WIDTH / 2) << GAME_FIX_SHIFT;
     boss->y = -(40L << GAME_FIX_SHIFT);
-    boss->hp = (int16_t) (kind == BOSS_AMIGA_BALL ? base_hp * 12 / 10 : kind == BOSS_FLYING_SAUCER ? base_hp * 15 / 10
+    boss->hp = (int16_t) (kind == BOSS_AMIGA_BALL ? base_hp * 18 / 10 : kind == BOSS_FLYING_SAUCER ? base_hp * 15 / 10
                           : kind == BOSS_BORG_CUBE ? base_hp * 18 / 10 : base_hp);
     boss->max_hp = boss->hp;
     boss->timer = 120;
     boss->timer2 = 250;
     switch (kind) {
     case BOSS_AMIGA_BALL:
-        boss->target_y = 100L << GAME_FIX_SHIFT;
-        boss->vx = (31457L + game_rand_below(state, 31457)) * (game_rand_below(state, 2) ? 1 : -1);
-        boss->vy = -94372L;
+        boss->target_y = 60L << GAME_FIX_SHIFT;
+        boss->vx = game_rand_below(state, 2) ? 1 : -1;   /* only the direction matters until it is bouncing */
+        boss->timer = 100;
+        boss->timer2 = (int16_t) (boss->vx > 0 ? 1 : -1);   /* the direction it remembers while it is not moving sideways */
+        boss->dash_timer = (int16_t) (BALL_DASH_MIN + game_rand_below(state, BALL_DASH_RAND));
         break;
     case BOSS_FLYING_SAUCER:
         boss->target_y = 48L << GAME_FIX_SHIFT;
@@ -1141,13 +1489,164 @@ static void spawn_boss_minion(GameState *state, const GameBoss *boss) {
     }
 }
 
+static int ball_interval(const GameState *state, int stage) {
+    const int base = 150 - (state->wave * 5) / 3;
+    const int interval = (base > 75 ? base : 75) * ball_burst_mul[stage] / 100;
+
+    return interval > BALL_BURST_MIN ? interval : BALL_BURST_MIN;
+}
+
+/* The Boing ball: it bounces, and loses its temper in three stages as it is hit. Each floor bounce sends a
+   shockwave along the floor, each top of a bounce a volley at the ship, in between it fires rings of bullets;
+   in the last stage it also hovers over the ship and drops on it. */
+static void update_ball(GameState *state) {
+    GameBoss *boss = &state->boss;
+    const uint8_t color = boss_bullet_color[BOSS_AMIGA_BALL];
+    const int stage = boss->hp > boss->max_hp * BALL_STAGE_HP_1 / 100 ? 0 : boss->hp > boss->max_hp * BALL_STAGE_HP_2 / 100 ? 1 : 2;
+    const int32_t previous_vy = boss->vy;
+    const int was_dashing = boss->dash_state != 0;
+    int32_t speed_x;
+    int index;
+
+    if (boss->stage_flash > 0) {
+        --boss->stage_flash;
+    }
+    if (stage > boss->stage) {
+        const int interval = ball_interval(state, stage);
+
+        emit(state, SFX_EXPLODE_LARGE);
+        boss->stage_flash = 33;
+        if (stage == 2 && boss->dash_timer > BALL_DASH_FIRST) {
+            boss->dash_timer = BALL_DASH_FIRST;
+        }
+        if (boss->timer > interval) {
+            boss->timer = (int16_t) interval;   /* a new stage must not keep the old stage's long wait */
+        }
+    }
+    boss->stage = (uint8_t) stage;
+
+    speed_x = ((int32_t) (BALL_SPEED_X_BASE + BALL_SPEED_X_PER_WAVE * (state->wave > 30 ? 30 : state->wave)) * 31457L / 1000) *
+              ball_speed_mul[stage] / 100;
+    if (speed_x > BALL_SPEED_X_MAX) {
+        speed_x = BALL_SPEED_X_MAX;
+    }
+    if (stage == 2 && boss->dash_state == 0 && boss->dash_timer > 0) {
+        --boss->dash_timer;
+    }
+
+    if (boss->dash_state == 1) {   /* hovering: follows the ship for a while, then locks and drops */
+        boss->vx = 0;
+        boss->vy = 0;
+        if (boss->dash_ticks > BALL_DASH_LOCK) {
+            int32_t follow = state->ship.x - boss->x;
+
+            follow = follow > BALL_DASH_TRACK ? BALL_DASH_TRACK : follow < -BALL_DASH_TRACK ? -BALL_DASH_TRACK : follow;
+            boss->x += follow;
+            if (boss->x < (BALL_WALL_LEFT << GAME_FIX_SHIFT)) {
+                boss->x = BALL_WALL_LEFT << GAME_FIX_SHIFT;
+            } else if (boss->x > (BALL_WALL_RIGHT << GAME_FIX_SHIFT)) {
+                boss->x = BALL_WALL_RIGHT << GAME_FIX_SHIFT;
+            }
+        }
+        if (boss->dash_ticks > 0) {
+            --boss->dash_ticks;
+        }
+        if (boss->dash_ticks == 0) {
+            boss->dash_state = 2;
+            boss->vy = BALL_DASH_DROP;
+        }
+    } else {
+        if (boss->dash_state == 2) {
+            boss->vx = 0;
+            boss->vy = BALL_DASH_DROP;
+        } else {
+            const int direction = boss->vx > 0 ? 1 : boss->vx < 0 ? -1 : boss->timer2;
+
+            boss->timer2 = (int16_t) direction;
+            boss->vx = direction * speed_x;
+            boss->vy = previous_vy + BALL_GRAVITY;
+        }
+        boss->x += boss->vx;
+        boss->y += boss->vy;
+        if (boss->x < (BALL_WALL_LEFT << GAME_FIX_SHIFT) || boss->x > (BALL_WALL_RIGHT << GAME_FIX_SHIFT)) {
+            boss->vx = -boss->vx;
+            boss->x = (boss->x < (BALL_WALL_LEFT << GAME_FIX_SHIFT)) ? (BALL_WALL_LEFT << GAME_FIX_SHIFT) : (BALL_WALL_RIGHT << GAME_FIX_SHIFT);
+        }
+        if (boss->y >= (BALL_FLOOR_Y << GAME_FIX_SHIFT)) {
+            int direction = boss->vx > 0 ? 1 : boss->vx < 0 ? -1 : boss->timer2;
+            const int dx = (int) ((state->ship.x - boss->x) >> GAME_FIX_SHIFT);
+            int side;
+
+            boss->y = BALL_FLOOR_Y << GAME_FIX_SHIFT;
+            boss->vy = -((ball_bounce_vy[stage] / 1000) * (1000 + game_rand_below(state, 121) - 60));   /* +-6% */
+            if (game_rand_below(state, 100) < ball_turn_percent[stage] && (dx > 60 || dx < -60)) {
+                direction = dx > 0 ? 1 : -1;
+            }
+            boss->timer2 = (int16_t) direction;
+            boss->vx = direction * speed_x;
+            if (boss->dash_state == 2) {
+                boss->dash_state = 0;
+                boss->dash_ticks = 0;
+                boss->dash_timer = (int16_t) (BALL_DASH_MIN + game_rand_below(state, BALL_DASH_RAND));
+            }
+            emit(state, SFX_EXPLODE_LARGE);
+            for (side = -1; side <= 1; side += 2) {   /* the shockwave runs along the floor to the wall */
+                for (index = 0; index < ball_slam_per_side[stage]; ++index) {
+                    const int32_t speed = ball_slam_speed[stage] + index * 47185L;
+                    const int32_t distance = side < 0 ? boss->x : ((int32_t) GAME_WORLD_WIDTH << GAME_FIX_SHIFT) - boss->x;
+                    int life = (int) (distance / speed);
+
+                    life = life < 1 ? 1 : life > 255 ? 255 : life;
+                    fire_enemy_bullet(state, boss->x, BALL_SLAM_Y << GAME_FIX_SHIFT, side * speed, 0, color, (uint8_t) life);
+                }
+            }
+        }
+        if (boss->y < (BALL_CEILING_Y << GAME_FIX_SHIFT)) {
+            boss->vy = boss->vy < 0 ? -boss->vy : boss->vy;
+            boss->y = BALL_CEILING_Y << GAME_FIX_SHIFT;
+        }
+        if (previous_vy < 0 && boss->vy >= 0 && !was_dashing) {   /* top of the bounce */
+            if (stage == 2 && boss->dash_timer <= 0) {
+                boss->vx = 0;
+                boss->vy = 0;
+                boss->dash_state = 1;
+                boss->dash_ticks = BALL_DASH_HOVER;
+            } else {
+                const int count = ball_volley_count[stage];
+
+                for (index = 0; index < count; ++index) {
+                    aim_enemy_bullet(state, boss->x, boss->y, ball_volley_speed[stage],
+                                     (uint16_t) ((2 * index - (count - 1)) * (BALL_VOLLEY_SPREAD / 2)), color, BALL_BULLET_LIFE);
+                }
+            }
+        }
+    }
+
+    boss->angle = (uint16_t) (boss->angle + (boss->vx > 0 ? BALL_SPIN : boss->vx < 0 ? -BALL_SPIN : 0));
+    if (!was_dashing && boss->dash_state == 0 && --boss->timer <= 0) {
+        const int count = ball_burst_count[stage];
+        const uint16_t offset = boss->parity ? (uint16_t) (32768L / count) : 0;
+
+        boss->timer = (int16_t) ball_interval(state, stage);
+        boss->parity ^= 1;
+        for (index = 0; index < count; ++index) {
+            const uint16_t heading = (uint16_t) ((65536L * index) / count + offset);
+
+            fire_enemy_bullet(state, boss->x, boss->y, trig_mul(ball_burst_speed[stage], trig_cos(heading)),
+                              trig_mul(ball_burst_speed[stage], trig_sin(heading)), color, BALL_BULLET_LIFE);
+        }
+    }
+}
+
 static void update_boss(GameState *state) {
     GameBoss *boss = &state->boss;
     const uint8_t color = boss_bullet_color[boss->kind];
     int index;
 
     boss->phase = (uint16_t) (boss->phase + 250);        /* 0.02 rad per 60 Hz frame */
-    boss->angle = (uint16_t) (boss->angle + 100);        /* spin */
+    if (boss->kind != BOSS_AMIGA_BALL) {
+        boss->angle = (uint16_t) (boss->angle + 100);    /* spin */
+    }
     if (boss->flash > 0) {
         --boss->flash;
     }
@@ -1162,30 +1661,7 @@ static void update_boss(GameState *state) {
 
     switch (boss->kind) {
     case BOSS_AMIGA_BALL:
-        boss->vy += 944;   /* gravity */
-        boss->x += boss->vx;
-        boss->y += boss->vy;
-        if (boss->x < (24L << GAME_FIX_SHIFT) || boss->x > (296L << GAME_FIX_SHIFT)) {
-            boss->vx = -boss->vx;
-            boss->x = (boss->x < (24L << GAME_FIX_SHIFT)) ? (24L << GAME_FIX_SHIFT) : (296L << GAME_FIX_SHIFT);
-        }
-        if (boss->y > (208L << GAME_FIX_SHIFT)) {
-            boss->vy = -((boss->vy < 0 ? -boss->vy : boss->vy) / 2 + 15729L + game_rand_below(state, 62914));
-            boss->y = 208L << GAME_FIX_SHIFT;
-            emit(state, SFX_EXPLODE_LARGE);
-        }
-        if (boss->y < (16L << GAME_FIX_SHIFT)) {
-            boss->vy = boss->vy < 0 ? -boss->vy : boss->vy;
-            boss->y = 16L << GAME_FIX_SHIFT;
-        }
-        if (--boss->timer <= 0) {
-            boss->timer = (int16_t) ((150 - state->wave * 2 > 75 ? 150 - state->wave * 2 : 75));
-            for (index = 0; index < 8; ++index) {
-                const uint16_t heading = (uint16_t) (index * 8192);
-                fire_enemy_bullet(state, boss->x, boss->y, trig_mul(110100L, trig_cos(heading)),
-                                  trig_mul(110100L, trig_sin(heading)), color, ENEMY_BULLET_LIFE);
-            }
-        }
+        update_ball(state);
         break;
 
     case BOSS_FLYING_SAUCER:
@@ -1243,7 +1719,17 @@ static void defeat_boss(GameState *state) {
 
     add_score(state, 2000u + 200u * (uint32_t) state->wave);
     emit(state, SFX_EXPLODE_LARGE);
-    spawn_powerup(state, boss->x, boss->y, game_rand_below(state, GAME_POWERUP_TYPES));
+    {
+        int weight[GAME_POWERUP_TYPES];
+
+        for (index = 0; index < GAME_POWERUP_TYPES; ++index) {
+            weight[index] = boss_drop_weight[index];
+        }
+        if (state->lives >= MAX_LIVES) {
+            weight[GAME_POWERUP_EXTRA_LIFE] = 0;   /* a full ship has no use for another life */
+        }
+        spawn_powerup(state, boss->x, boss->y, pick_weighted(state, weight, GAME_POWERUP_TYPES));
+    }
     for (index = 0; index < GAME_MAX_POWERUPS; ++index) {
         if (state->powerups[index].active && state->powerups[index].x == boss->x) {
             state->powerups[index].life = 500;   /* the reward stays around longer */
@@ -1254,31 +1740,72 @@ static void defeat_boss(GameState *state) {
     memset(state->enemy_bullets, 0, sizeof(state->enemy_bullets));
 }
 
+/* The alien director (Lovable's spawn director): one new unit per event, as many events as the wave's budget,
+   which types are allowed depends on the wave, and only a few may be out at once. A purple swarm counts as one. */
+static void spawn_alien_event(GameState *state) {
+    static const uint8_t intro_wave[4] = {3, 7, 11, 14};   /* brown, green, blue, purple */
+    static const uint8_t type_weight[4] = {4, 3, 2, 2};
+    int units[4];
+    int weight[4];
+    int total_units;
+    int global_cap;
+    int allowed = 0;
+    int type;
+
+    units[0] = count_enemies(state, ENEMY_BROWN);
+    units[1] = count_enemies(state, ENEMY_GREEN);
+    units[2] = count_enemies(state, ENEMY_BLUE);
+    units[3] = (count_enemies(state, ENEMY_PURPLE) + 2) / 3;
+    total_units = units[0] + units[1] + units[2] + units[3];
+    global_cap = state->wave < 7 ? 1 : state->wave < 12 ? 2 : 3;
+
+    for (type = 0; type < 4; ++type) {
+        const int cap = (type == 0) ? 2 : (type == 1 && state->wave >= 16) ? 2 : 1;
+
+        weight[type] = (total_units < global_cap && state->wave >= intro_wave[type] && units[type] < cap) ? type_weight[type] : 0;
+        allowed += weight[type];
+    }
+    if (allowed == 0) {
+        state->alien_timer = 100;   /* nothing may come right now: look again soon */
+        return;
+    }
+    switch (pick_weighted(state, weight, 4)) {
+    case 0:
+        spawn_alien(state, ENEMY_BROWN);
+        break;
+    case 1:
+        spawn_alien(state, ENEMY_GREEN);
+        break;
+    case 2:
+        spawn_alien(state, ENEMY_BLUE);
+        break;
+    default:
+        spawn_swarm(state);
+        break;
+    }
+    --state->alien_budget;
+    state->alien_timer = (int16_t) ((600 - state->wave * 10 > 350 ? 600 - state->wave * 10 : 350) + game_rand_below(state, 250));
+}
+
 static void update_enemies(GameState *state) {
     int index;
 
-    /* spawning: none during a boss fight */
+    /* spawning: none during a boss fight or the pause between waves */
     if (!state->boss.active) {
-        if (--state->ufo_timer <= 0) {
-            state->ufo_timer = (int16_t) ((750 - state->wave * 25 > 333 ? 750 - state->wave * 25 : 333) + game_rand_below(state, 333));
-            if (count_enemies(state, ENEMY_UFO_LARGE) + count_enemies(state, ENEMY_UFO_SMALL) == 0) {
+        if (state->wave_clear_timer == 0) {
+            if (state->ufo_timer > 0) {
+                --state->ufo_timer;
+            }
+            if (state->ufo_timer == 0 && count_ufos(state) == 0) {
+                state->ufo_timer = (int16_t) ((1000 - state->wave * 21 > 500 ? 1000 - state->wave * 21 : 500) + game_rand_below(state, 333));
                 spawn_ufo(state);
             }
-        }
-        if (--state->alien_timer <= 0) {
-            if (state->wave >= 3 && count_enemies(state, ENEMY_BROWN) < 3) {
-                spawn_alien(state, ENEMY_BROWN);
+            if (state->alien_timer > 0) {
+                --state->alien_timer;
             }
-            if (state->wave >= 6 && count_enemies(state, ENEMY_GREEN) < 2) {
-                spawn_alien(state, ENEMY_GREEN);
+            if (state->alien_timer == 0 && state->alien_budget > 0) {
+                spawn_alien_event(state);
             }
-            if (state->wave >= 8 && count_enemies(state, ENEMY_BLUE) < 1) {
-                spawn_alien(state, ENEMY_BLUE);
-            }
-            if (state->wave >= 12 && count_enemies(state, ENEMY_PURPLE) < 3) {
-                spawn_swarm(state);
-            }
-            state->alien_timer = (int16_t) ((417 - state->wave * 17 > 150 ? 417 - state->wave * 17 : 150) + game_rand_below(state, 167));
         }
     } else {
         update_boss(state);
@@ -1289,7 +1816,7 @@ static void update_enemies(GameState *state) {
         GameEnemy *enemy = &state->enemies[index];
         if (enemy->active) {
             update_enemy(state, enemy);
-            if (enemy->active && (enemy->kind == ENEMY_UFO_LARGE || enemy->kind == ENEMY_UFO_SMALL)) {
+            if (enemy->active && enemy->warn <= 0 && (enemy->kind == ENEMY_UFO_LARGE || enemy->kind == ENEMY_UFO_SMALL)) {
                 state->ufo_present = 1;
             }
         }
@@ -1324,8 +1851,8 @@ static void resolve_bullets_vs_enemies(GameState *state) {
         }
         for (enemy_index = 0; enemy_index < GAME_MAX_ENEMIES; ++enemy_index) {
             GameEnemy *enemy = &state->enemies[enemy_index];
-            if (!enemy->active || (enemy->flags & 1)) {
-                continue;   /* an invisible sentinel cannot be hit */
+            if (!enemy->active || (enemy->flags & 1) || enemy->warn > 0) {
+                continue;   /* an invisible sentinel, or one still being announced, cannot be hit */
             }
             if (within_radius(bullet->x, bullet->y, enemy->x, enemy->y, enemy_radius_table[enemy->kind] + BULLET_RADIUS)) {
                 bullet->active = 0;
@@ -1359,7 +1886,7 @@ static void resolve_enemy_threats(GameState *state) {
     }
     for (index = 0; index < GAME_MAX_ENEMIES; ++index) {
         const GameEnemy *enemy = &state->enemies[index];
-        if (enemy->active && !(enemy->flags & 1) &&
+        if (enemy->active && !(enemy->flags & 1) && enemy->warn <= 0 &&
             within_radius(state->ship.x, state->ship.y, enemy->x, enemy->y, enemy_radius_table[enemy->kind] + SHIP_RADIUS)) {
             lose_life(state);
             return;
@@ -1436,16 +1963,134 @@ static void resolve_bullet_collisions(GameState *state) {
         emit(state, exploded.size == GAME_ASTEROID_LARGE ? SFX_EXPLODE_LARGE :
                     exploded.size == GAME_ASTEROID_MEDIUM ? SFX_EXPLODE_MEDIUM : SFX_EXPLODE_SMALL);
         split_asteroid(state, &exploded);
-        maybe_drop_powerup(state, exploded.x, exploded.y);
+        maybe_drop_powerup(state, exploded.x, exploded.y,
+                           exploded.size == GAME_ASTEROID_LARGE ? DROP_ASTEROID_LARGE :
+                           exploded.size == GAME_ASTEROID_MEDIUM ? DROP_ASTEROID_MEDIUM : DROP_ASTEROID_SMALL);
         ++bullet_index;   /* the rock went and its pieces came; carry on with the next bullet */
     }
 }
 
+/* ---- respawning ---- */
+
+#define RESPAWN_MARGIN_X 40                  /* Lovable: 100 of 800 */
+#define RESPAWN_MARGIN_Y 32                  /* 80 of 600 */
+#define RESPAWN_CANDIDATES_X 9
+#define RESPAWN_CANDIDATES_Y 6
+#define RESPAWN_RANDOM_CANDIDATES 10
+static const uint8_t respawn_lookahead[4] = {0, 25, 50, 75};   /* 0, 30, 60, 90 ticks ahead */
+
+/* How far (in pixels, less the sizes of both) a spot is from a moving object, at its worst over the next 1.5 s. */
+static int hazard_clearance(int cx, int cy, int32_t x, int32_t y, int32_t vx, int32_t vy, int radius) {
+    int worst = 32000;
+    int step;
+
+    for (step = 0; step < 4; ++step) {
+        const int t = respawn_lookahead[step];
+        int px = (int) ((x + vx * t) >> GAME_FIX_SHIFT);
+        int py = (int) ((y + vy * t) >> GAME_FIX_SHIFT);
+        int clearance;
+
+        while (px < 0) {
+            px += GAME_WORLD_WIDTH;
+        }
+        while (px >= GAME_WORLD_WIDTH) {
+            px -= GAME_WORLD_WIDTH;
+        }
+        while (py < 0) {
+            py += GAME_WORLD_HEIGHT;
+        }
+        while (py >= GAME_WORLD_HEIGHT) {
+            py -= GAME_WORLD_HEIGHT;
+        }
+        clearance = approx_dist(torus_delta(cx, px, GAME_WORLD_WIDTH), torus_delta(cy, py, GAME_WORLD_HEIGHT)) - radius - SHIP_RADIUS;
+        if (clearance < worst) {
+            worst = clearance;
+        }
+    }
+    return worst;
+}
+
+/* The ship comes back at the quietest spot: of a grid of places, the one farthest from every rock, enemy and the
+   boss (where they will be soon, not only where they are); the one nearest the middle wins a tie. */
+static void find_quiet_spot(GameState *state, int *spot_x, int *spot_y) {
+    int best_x = GAME_WORLD_WIDTH / 2;
+    int best_y = GAME_WORLD_HEIGHT / 2;
+    int best_score = -32000;
+    int best_centre = 32000;
+    int candidate;
+
+    for (candidate = 0; candidate < RESPAWN_CANDIDATES_X * RESPAWN_CANDIDATES_Y + RESPAWN_RANDOM_CANDIDATES; ++candidate) {
+        int cx;
+        int cy;
+        int score = 32000;
+        int centre;
+        int index;
+
+        if (candidate < RESPAWN_CANDIDATES_X * RESPAWN_CANDIDATES_Y) {
+            const int column = candidate % RESPAWN_CANDIDATES_X;
+            const int row = candidate / RESPAWN_CANDIDATES_X;
+
+            cx = RESPAWN_MARGIN_X + ((2 * column + 1) * (GAME_WORLD_WIDTH - 2 * RESPAWN_MARGIN_X)) / (2 * RESPAWN_CANDIDATES_X);
+            cy = RESPAWN_MARGIN_Y + ((2 * row + 1) * (GAME_WORLD_HEIGHT - 2 * RESPAWN_MARGIN_Y)) / (2 * RESPAWN_CANDIDATES_Y);
+        } else {
+            cx = RESPAWN_MARGIN_X + game_rand_below(state, GAME_WORLD_WIDTH - 2 * RESPAWN_MARGIN_X);
+            cy = RESPAWN_MARGIN_Y + game_rand_below(state, GAME_WORLD_HEIGHT - 2 * RESPAWN_MARGIN_Y);
+        }
+        for (index = 0; index < GAME_MAX_ASTEROIDS && score >= best_score; ++index) {
+            const GameAsteroid *rock = &state->asteroids[index];
+            int clearance;
+
+            if (rock->active) {
+                clearance = hazard_clearance(cx, cy, rock->x, rock->y, rock->vx, rock->vy, asteroid_radius_table[rock->size]);
+                score = clearance < score ? clearance : score;
+            }
+        }
+        for (index = 0; index < GAME_MAX_ENEMIES && score >= best_score; ++index) {
+            const GameEnemy *enemy = &state->enemies[index];
+            int clearance;
+
+            if (enemy->active && enemy->warn <= 0) {
+                clearance = hazard_clearance(cx, cy, enemy->x, enemy->y, enemy->vx, enemy->vy, enemy_radius_table[enemy->kind]);
+                score = clearance < score ? clearance : score;
+            }
+        }
+        if (state->boss.active && score >= best_score) {
+            const int clearance = hazard_clearance(cx, cy, state->boss.x, state->boss.y, 0, 0, boss_radius_table[state->boss.kind]);
+
+            score = clearance < score ? clearance : score;
+        }
+        if (score < best_score) {
+            continue;   /* something is closer here than at the best spot so far */
+        }
+        {
+            const int dx = cx - GAME_WORLD_WIDTH / 2;
+            const int dy = cy - GAME_WORLD_HEIGHT / 2;
+
+            centre = approx_dist(dx, dy);
+        }
+        if (score > best_score || centre < best_centre) {
+            best_x = cx;
+            best_y = cy;
+            best_score = score;
+            best_centre = centre;
+        }
+    }
+    *spot_x = best_x;
+    *spot_y = best_y;
+}
+
 static void lose_life(GameState *state) {
+    int spot_x;
+    int spot_y;
+
     if (state->lives > 0) {
         --state->lives;
     }
+    state->life_lost_this_wave = 1;
     reset_ship(state);
+    find_quiet_spot(state, &spot_x, &spot_y);
+    state->ship.x = (int32_t) spot_x << GAME_FIX_SHIFT;
+    state->ship.y = (int32_t) spot_y << GAME_FIX_SHIFT;
     memset(state->enemy_bullets, 0, sizeof(state->enemy_bullets));
     emit(state, SFX_SHIP_DEATH);
     if (state->lives == 0) {
@@ -1565,6 +2210,11 @@ int game_scores_unpack(GameState *state, const uint8_t *data) {
 void game_start(GameState *state) {
     state->score = 0;
     state->next_extra_life = GAME_EXTRA_LIFE_INTERVAL;
+    state->extra_life_count = 0;
+    state->wave_clear_timer = 0;
+    state->drop_cooldown = 0;
+    state->pity_timer = 0;
+    state->life_gap_timer = LIFE_DROP_GAP_FRAMES;   /* the first extra-life drop may come at once */
     state->wave = 1;
     state->lives = GAME_START_LIVES;
     state->paused = 0;
@@ -1653,6 +2303,13 @@ static void step_title(GameState *state, const GameInput *input, const GameInput
     }
 }
 
+/* The next wave: the ship keeps its place and speed, the rocks come in away from it. */
+static void next_wave(GameState *state) {
+    ++state->wave;
+    memset(state->bullets, 0, sizeof(state->bullets));
+    spawn_wave(state);
+}
+
 static void step_playing(GameState *state, const GameInput *input, const GameInput *previous) {
     if (pressed(input->escape, previous->escape)) {
         if (state->paused) {
@@ -1694,10 +2351,25 @@ static void step_playing(GameState *state, const GameInput *input, const GameInp
     if (state->banner_timer > 0) {
         --state->banner_timer;
     }
-    if (state->mode == GAME_MODE_PLAYING && !active_asteroids(state) && !any_enemies(state)) {
-        ++state->wave;
-        reset_ship(state);
-        spawn_wave(state);
+    if (state->mode != GAME_MODE_PLAYING) {
+        return;
+    }
+    if (state->wave_clear_timer > 0) {
+        if (--state->wave_clear_timer == 0) {
+            next_wave(state);
+        }
+    } else if (!active_asteroids(state) && !any_enemies(state)) {
+        if (state->wave % 5 == 0) {
+            next_wave(state);   /* a boss fight ends straight in the next wave */
+        } else {
+            /* a pause, and a bonus that grows with the wave (500 more if you did not lose a life) */
+            const uint16_t bonus = (uint16_t) ((state->wave > 20 ? 20 : state->wave) * 100 + (state->life_lost_this_wave ? 0 : 500));
+
+            add_score_plain(state, bonus);
+            state->clear_bonus = bonus;
+            state->wave_clear_timer = WAVE_CLEAR_FRAMES;
+            emit(state, SFX_WAVE_START);
+        }
     }
 }
 
@@ -2154,6 +2826,21 @@ static void draw_enemy(const GameState *state, const GameEnemy *enemy, const Gam
     const int cy = screen_y(state, enemy->y);
     const uint8_t color = enemy_color_table[enemy->kind];
 
+    if (enemy->warn > 0) {
+        /* an arrow at the edge the enemy is about to fly in from; it blinks just before the enemy arrives */
+        if (enemy->warn > ENTRY_WARN_BLINK_FRAMES || ((enemy->warn >> 2) & 1)) {
+            const int left = enemy->vx > 0;
+            const int tip = left ? screen_x(state, 10L << GAME_FIX_SHIFT) : screen_x(state, 309L << GAME_FIX_SHIFT);
+            const int base = left ? screen_x(state, 2L << GAME_FIX_SHIFT) : screen_x(state, 317L << GAME_FIX_SHIFT);
+            const int half = scale_y(state, 5);
+
+            renderer->line(renderer->context, base, cy - half, tip, cy, color);
+            renderer->line(renderer->context, tip, cy, base, cy + half, color);
+            renderer->line(renderer->context, base, cy + half, base, cy - half, color);
+        }
+        mark_rect(renderer, state->field_x, cy - scale_y(state, 6), state->field_x + state->field_width, cy + scale_y(state, 6));
+        return;
+    }
     if (enemy->flags & 1) {
         return;   /* invisible */
     }
@@ -2171,11 +2858,35 @@ static void draw_enemy(const GameState *state, const GameEnemy *enemy, const Gam
         draw_offset_line(state, renderer, cx, cy, 2, -1, 2, 1, GAME_COLOR_WHITE);
         break;
     case ENEMY_GREEN:
+        if (enemy->timer <= GREEN_TELEGRAPH_FRAMES && enemy->timer > 0 && ((enemy->timer >> 1) & 1)) {
+            /* about to fire: a flashing box around it */
+            const int box = scale_x(state, 9);
+            const int boy = scale_y(state, 9);
+
+            renderer->line(renderer->context, cx - box, cy - boy, cx + box, cy - boy, GAME_COLOR_YELLOW);
+            renderer->line(renderer->context, cx + box, cy - boy, cx + box, cy + boy, GAME_COLOR_YELLOW);
+            renderer->line(renderer->context, cx + box, cy + boy, cx - box, cy + boy, GAME_COLOR_YELLOW);
+            renderer->line(renderer->context, cx - box, cy + boy, cx - box, cy - boy, GAME_COLOR_YELLOW);
+            mark_rect(renderer, cx - box, cy - boy, cx + box, cy + boy);
+        }
         draw_shape(state, renderer, cx, cy, green_body, 6, color, 0);
         draw_offset_line(state, renderer, cx, cy, -2, -2, -1, -2, GAME_COLOR_WHITE);
         draw_offset_line(state, renderer, cx, cy, 1, -2, 2, -2, GAME_COLOR_WHITE);
         break;
     case ENEMY_BLUE:
+        if ((enemy->flags & 2) && enemy->charge > 0) {
+            /* a ring where it will reappear */
+            const int tx = screen_x(state, (int32_t) enemy->tp_x << GAME_FIX_SHIFT);
+            const int ty = screen_y(state, (int32_t) enemy->tp_y << GAME_FIX_SHIFT);
+            const int rx = scale_x(state, 7);
+            const int ry = scale_y(state, 7);
+
+            renderer->line(renderer->context, tx - rx, ty, tx, ty - ry, color);
+            renderer->line(renderer->context, tx, ty - ry, tx + rx, ty, color);
+            renderer->line(renderer->context, tx + rx, ty, tx, ty + ry, color);
+            renderer->line(renderer->context, tx, ty + ry, tx - rx, ty, color);
+            mark_rect(renderer, tx - rx, ty - ry, tx + rx, ty + ry);
+        }
         if ((enemy->flags & 2) && (enemy->age & 2)) {
             return;   /* flickers while charging a teleport */
         }
@@ -2244,7 +2955,7 @@ static int ellipse_points(const GameState *state, int cx, int cy, int rx, int ry
 static void draw_boss(const GameState *state, const GameBoss *boss, const GameRenderer *renderer) {
     const int cx = screen_x(state, boss->x);
     const int cy = screen_y(state, boss->y);
-    const uint8_t body = boss->flash > 0 ? GAME_COLOR_WHITE : boss_color_table[boss->kind];
+    const uint8_t body = (boss->flash > 0 || (boss->stage_flash > 0 && (boss->stage_flash & 2))) ? GAME_COLOR_WHITE : boss_color_table[boss->kind];
     int16_t points[40];
     int count;
     int index;
@@ -2344,7 +3055,15 @@ static void draw_boss(const GameState *state, const GameBoss *boss, const GameRe
 
         renderer->line(renderer->context, x, y, x + (bar > 0 ? bar : 1), y, GAME_COLOR_RED);
         renderer->line(renderer->context, x, y + 1, x + (bar > 0 ? bar : 1), y + 1, GAME_COLOR_RED);
-        mark_rect(renderer, x, y, x + BOSS_BAR_WIDTH, y + 1);
+        if (boss->kind == BOSS_AMIGA_BALL) {
+            /* where the Boing ball changes stage */
+            const int mark_1 = x + BOSS_BAR_WIDTH * BALL_STAGE_HP_1 / 100;
+            const int mark_2 = x + BOSS_BAR_WIDTH * BALL_STAGE_HP_2 / 100;
+
+            renderer->line(renderer->context, mark_1, y - 1, mark_1, y + 2, GAME_COLOR_YELLOW);
+            renderer->line(renderer->context, mark_2, y - 1, mark_2, y + 2, GAME_COLOR_YELLOW);
+        }
+        mark_rect(renderer, x, y - 1, x + BOSS_BAR_WIDTH, y + 2);
     }
 }
 
@@ -2690,6 +3409,21 @@ void game_render(GameState *state, const GameRenderer *renderer) {
 
         if (state->paused) {
             draw_pause_overlay(state, renderer);
+        } else if (state->wave_clear_timer > 0) {
+            char line[16];
+
+            memcpy(line, "WAVE ", 5);
+            format_number(line + 5, state->wave % 100u, 2);
+            memcpy(line + 7, " CLEAR", 7);
+            put_centered_overlay(state, renderer, 52, line, GAME_COLOR_WHITE);
+            line[0] = 'B';
+            line[1] = 'O';
+            line[2] = 'N';
+            line[3] = 'U';
+            line[4] = 'S';
+            line[5] = ' ';
+            format_number(line + 6, state->clear_bonus, 4);
+            put_centered_overlay(state, renderer, 68, line, GAME_COLOR_YELLOW);
         } else if (state->banner_timer > 0) {
             char banner[8];
 

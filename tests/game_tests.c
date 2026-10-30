@@ -1,3 +1,4 @@
+#include <stdlib.h>
 #include "game.h"
 
 #include <stdio.h>
@@ -22,6 +23,26 @@ static int checks;
     } while (0)
 
 static const GameInput no_input = {0, 0, 0, 0, 0, 0, 0, 0};
+
+
+/* A cleared wave now pauses for a moment ("WAVE n CLEAR") before the next one starts: step until the wave changes. */
+static void step_to_next_wave(GameState *state) {
+    const uint8_t wave = state->wave;
+    int guard;
+
+    for (guard = 0; guard < 200 && state->wave == wave; ++guard) {
+        game_step(state, &no_input);
+    }
+}
+
+/* Skip the entry warning of every enemy on the field. */
+static void end_warnings(GameState *state) {
+    int index;
+
+    for (index = 0; index < GAME_MAX_ENEMIES; ++index) {
+        state->enemies[index].warn = 0;
+    }
+}
 
 /* ---- capture renderer ---- */
 
@@ -131,6 +152,7 @@ static GameRenderer make_renderer(void) {
     renderer.points = capture_points;
     renderer.polygon_offsets = NULL;
     renderer.rocks = NULL;
+    renderer.low_detail = 0;
     return renderer;
 }
 
@@ -284,7 +306,7 @@ static void test_wave_sizes(void) {
         state.wave = (uint8_t) (wave - 1);
         state.ufo_timer = 30000;
         state.alien_timer = 30000;
-        game_step(&state, &no_input);
+        step_to_next_wave(&state);
         CHECK(state.wave == wave);
         if (wave % 5 == 0) {
             CHECK(state.boss.active);                    /* every fifth wave is a boss fight, without rocks */
@@ -462,6 +484,10 @@ static void test_bullets(void) {
     CHECK(!state.bullets[0].active);
 }
 
+static long distance_squared(long ax, long ay, long bx, long by);
+static GameEnemy *first_enemy(GameState *state, int kind);
+static void shoot_enemy(GameState *state, GameEnemy *enemy);
+
 static void test_ship_collision(void) {
     GameState state;
 
@@ -479,7 +505,11 @@ static void test_ship_collision(void) {
     CHECK(state.lives == 2);
     CHECK(state.mode == GAME_MODE_PLAYING);
     CHECK(state.ship.invulnerability == 100);
-    CHECK(state.ship.x == ((long) (GAME_WORLD_WIDTH / 2) << GAME_FIX_SHIFT));
+    CHECK(state.life_lost_this_wave);
+    /* it comes back at a quiet spot, not on top of the rock that hit it, and inside the field */
+    CHECK(state.ship.x >= (40L << GAME_FIX_SHIFT) && state.ship.x <= (280L << GAME_FIX_SHIFT));
+    CHECK(state.ship.y >= (32L << GAME_FIX_SHIFT) && state.ship.y <= (208L << GAME_FIX_SHIFT));
+    CHECK(distance_squared(state.ship.x, state.ship.y, state.asteroids[1].x, state.asteroids[1].y) > 40L * 40L);
 }
 
 static void test_wave_clear_advances(void) {
@@ -489,9 +519,16 @@ static void test_wave_clear_advances(void) {
     memset(state.asteroids, 0, sizeof(state.asteroids));
     game_step(&state, &no_input);
 
+    /* the wave is over: a pause with a bonus (wave 1 x 100, and 500 for not losing a life) comes first */
+    CHECK(state.wave == 1);
+    CHECK(state.wave_clear_timer > 0);
+    CHECK(state.clear_bonus == 600);
+    CHECK(state.score == 600);
+    step_to_next_wave(&state);
+
     CHECK(state.wave == 2);
     CHECK(count_asteroids(&state, GAME_ASTEROID_LARGE) == 8);
-    CHECK(state.ship.invulnerability == 100);
+    CHECK(state.ship.invulnerability >= 49);   /* a short grace, not a full respawn's worth */
     CHECK(state.banner_timer > 0);
 }
 
@@ -512,7 +549,7 @@ static void test_asteroid_speeds_scale_with_wave(void) {
             memset(state.asteroids, 0, sizeof(state.asteroids));
             state.wave = (uint8_t) (wave - 1);
             state.rng_state += (uint32_t) round * 7919u;
-            game_step(&state, &no_input);
+            step_to_next_wave(&state);
             for (index = 0; index < GAME_MAX_ASTEROIDS; ++index) {
                 const GameAsteroid *asteroid = &state.asteroids[index];
                 if (asteroid->active) {
@@ -559,11 +596,11 @@ static void test_extra_lives(void) {
     game_step(&state, &no_input);
     CHECK(state.score == 10010);
     CHECK(state.lives == 4);
-    CHECK(state.next_extra_life == 20000);
+    CHECK(state.next_extra_life == 30000);   /* then 30000, 60000, 100000 ... */
 
-    /* lives are capped at 9 */
-    state.lives = 9;
-    state.score = 19990;
+    /* lives are capped at 5 */
+    state.lives = 5;
+    state.score = 29990;
     state.asteroids[1].active = 1;
     state.asteroids[1].size = GAME_ASTEROID_LARGE;
     state.asteroids[1].x = 100L << GAME_FIX_SHIFT;
@@ -573,8 +610,23 @@ static void test_extra_lives(void) {
     state.bullets[0].x = state.asteroids[1].x;
     state.bullets[0].y = state.asteroids[1].y;
     game_step(&state, &no_input);
-    CHECK(state.lives == 9);
-    CHECK(state.next_extra_life == 30000);
+    CHECK(state.lives == 5);
+    CHECK(state.next_extra_life == 60000);
+
+    /* the later thresholds */
+    state.score = 59990;
+    state.lives = 3;
+    state.asteroids[1].active = 1;
+    state.asteroids[1].size = GAME_ASTEROID_LARGE;
+    state.asteroids[1].x = 100L << GAME_FIX_SHIFT;
+    state.asteroids[1].y = 50L << GAME_FIX_SHIFT;
+    state.bullets[0].active = 1;
+    state.bullets[0].life = 4;
+    state.bullets[0].x = state.asteroids[1].x;
+    state.bullets[0].y = state.asteroids[1].y;
+    game_step(&state, &no_input);
+    CHECK(state.lives == 4);
+    CHECK(state.next_extra_life == 100000);
 }
 
 static long distance_squared(long ax, long ay, long bx, long by) {
@@ -1842,6 +1894,9 @@ static void test_powerup_drops(void) {
         int index;
 
         memset(state.powerups, 0, sizeof(state.powerups));
+        state.drop_cooldown = 0;
+        state.pity_timer = 0;
+        state.life_drops_this_wave = 0;
         put_bullet_on_new_large_rock(&state);
         state.ship.invulnerability = 255;
         game_step(&state, &no_input);
@@ -1857,10 +1912,140 @@ static void test_powerup_drops(void) {
         }
         state.score = 0;
     }
-    /* Lovable: 15% of destroyed rocks drop one (800 kills: expect about 120) */
-    CHECK(drops > 85 && drops < 160);
-    for (trial = 0; trial < GAME_POWERUP_TYPES; ++trial) {
-        CHECK(types[trial] > 10);   /* all four kinds turn up */
+    /* Lovable: 8% of destroyed large rocks drop one (800 kills: expect about 64) */
+    CHECK(drops > 40 && drops < 95);
+    CHECK(types[GAME_POWERUP_SHIELD] > 10);
+    CHECK(types[GAME_POWERUP_RAPID_FIRE] > 8);
+    CHECK(types[GAME_POWERUP_MULTIPLIER] > 8);
+    CHECK(types[GAME_POWERUP_EXTRA_LIFE] <= 800 / 100);   /* rare: only with three lives or fewer, at most one a wave */
+}
+
+/* Drops by source and the rules around them: a cooldown, a limit on screen, a guarantee after a dry spell,
+   and extra lives only when they are needed. */
+static void test_powerup_economy(void) {
+    GameState state;
+    int trial;
+    int drops;
+    int counts[6];
+    static const int sources[6] = {0, 1, 2, 3, 4, 5};   /* large, medium, small rock; large UFO, small UFO, alien */
+    static const int enemy_kind[6] = {0, 0, 0, GAME_ENEMY_UFO_LARGE, GAME_ENEMY_UFO_SMALL, GAME_ENEMY_BROWN};
+    int source;
+
+    for (source = 0; source < 6; ++source) {
+        drops = 0;
+        for (trial = 0; trial < 1000; ++trial) {
+            init_playing(&state);
+            clear_field(&state);
+            state.ship.invulnerability = 255;
+            memset(state.powerups, 0, sizeof(state.powerups));
+            if (sources[source] < 3) {
+                const uint8_t size = (uint8_t) (GAME_ASTEROID_LARGE - sources[source]);
+                state.asteroids[1].active = 1;
+                state.asteroids[1].size = size;
+                state.asteroids[1].point_count = 8;
+                state.asteroids[1].x = 100L << GAME_FIX_SHIFT;
+                state.asteroids[1].y = 50L << GAME_FIX_SHIFT;
+                state.bullets[0].active = 1;
+                state.bullets[0].life = 4;
+                state.bullets[0].x = state.asteroids[1].x;
+                state.bullets[0].y = state.asteroids[1].y;
+            } else {
+                game_spawn_enemy_now(&state, enemy_kind[source]);
+                shoot_enemy(&state, first_enemy(&state, enemy_kind[source]));
+            }
+            state.rng_state = (uint32_t) trial * 2654435761u + (uint32_t) source * 40503u + 1u;
+            game_step(&state, &no_input);
+            drops += active_powerups(&state) > 0;
+        }
+        counts[source] = drops;
+    }
+    CHECK(counts[0] > 40 && counts[0] < 130);       /* 8% */
+    CHECK(counts[1] > 15 && counts[1] < 75);        /* 4% */
+    CHECK(counts[2] == 0);                          /* small rocks never */
+    CHECK(counts[3] > 230 && counts[3] < 380);      /* 30% */
+    CHECK(counts[4] > 430 && counts[4] < 570);      /* 50% */
+    CHECK(counts[5] > 190 && counts[5] < 310);      /* 25% */
+
+    /* after a drop there is a cooldown (5 s) before the next */
+    init_playing(&state);
+    clear_field(&state);
+    state.ship.invulnerability = 255;
+    state.drop_cooldown = 100;
+    state.pity_timer = 5000;
+    put_bullet_on_new_large_rock(&state);
+    game_step(&state, &no_input);
+    CHECK(active_powerups(&state) == 0);
+
+    /* never more than two on the screen */
+    init_playing(&state);
+    clear_field(&state);
+    state.ship.invulnerability = 255;
+    state.powerups[0].active = 1;
+    state.powerups[0].life = 300;
+    state.powerups[0].x = 10L << GAME_FIX_SHIFT;
+    state.powerups[0].y = 10L << GAME_FIX_SHIFT;
+    state.powerups[1] = state.powerups[0];
+    state.pity_timer = 5000;
+    put_bullet_on_new_large_rock(&state);
+    game_step(&state, &no_input);
+    CHECK(active_powerups(&state) == 2);
+
+    /* 30 s without a drop guarantees one from any rock but a small one */
+    for (trial = 0; trial < 50; ++trial) {
+        init_playing(&state);
+        clear_field(&state);
+        state.ship.invulnerability = 255;
+        state.pity_timer = 1500;
+        state.rng_state += (uint32_t) trial * 7919u;
+        put_bullet_on_new_large_rock(&state);
+        game_step(&state, &no_input);
+        CHECK(active_powerups(&state) == 1);
+        CHECK(state.drop_cooldown > 0 && state.pity_timer < 5);
+    }
+
+    /* extra lives drop only with three lives or fewer */
+    {
+        int with_few = 0;
+        int with_many = 0;
+
+        for (trial = 0; trial < 300; ++trial) {
+            int pass;
+
+            for (pass = 0; pass < 2; ++pass) {
+                init_playing(&state);
+                clear_field(&state);
+                state.ship.invulnerability = 255;
+                state.lives = (uint8_t) (pass ? 4 : 1);
+                state.pity_timer = 1500;
+                state.rng_state += (uint32_t) trial * 104729u + (uint32_t) pass;
+                put_bullet_on_new_large_rock(&state);
+                game_step(&state, &no_input);
+                if (state.powerups[0].active && state.powerups[0].type == GAME_POWERUP_EXTRA_LIFE) {
+                    if (pass) {
+                        ++with_many;
+                    } else {
+                        ++with_few;
+                    }
+                }
+            }
+        }
+        CHECK(with_many == 0);
+        CHECK(with_few > 25 && with_few < 70);   /* weight 12 of 112 with one life left: about 11% of 300 */
+    }
+
+    /* and not twice in a wave */
+    init_playing(&state);
+    clear_field(&state);
+    state.ship.invulnerability = 255;
+    state.lives = 1;
+    state.life_drops_this_wave = 1;
+    for (trial = 0; trial < 100; ++trial) {
+        memset(state.powerups, 0, sizeof(state.powerups));
+        state.drop_cooldown = 0;
+        state.pity_timer = 1500;
+        put_bullet_on_new_large_rock(&state);
+        game_step(&state, &no_input);
+        CHECK(!(state.powerups[0].active && state.powerups[0].type == GAME_POWERUP_EXTRA_LIFE));
     }
 }
 
@@ -1902,7 +2087,8 @@ static void test_powerup_shield(void) {
     (void) game_take_sound_events(&state);
     game_step(&state, &no_input);
     CHECK(!state.powerups[0].active);
-    CHECK(state.shield_timer == 249);
+    CHECK(state.shield_timer == 349);   /* 7 seconds */
+    CHECK(state.score == 150);          /* and every pick-up pays a bonus */
     CHECK(events_contain_bit(game_take_sound_events(&state), SFX_POWERUP));
 
     /* rocks pass through the shielded ship... */
@@ -1911,10 +2097,10 @@ static void test_powerup_shield(void) {
         game_step(&state, &no_input);
     }
     CHECK(state.lives == 3);
-    CHECK(state.shield_timer == 149);
+    CHECK(state.shield_timer == 249);
 
-    /* ...until it runs out (250 frames, 5 s) */
-    for (frame = 0; frame < 149; ++frame) {
+    /* ...until it runs out (350 frames, 7 s) */
+    for (frame = 0; frame < 249; ++frame) {
         state.asteroids[1].x = state.ship.x;
         state.asteroids[1].y = state.ship.y;
         state.asteroids[1].active = 1;
@@ -2248,6 +2434,7 @@ static void quiet_playing(GameState *state, int wave) {
     state->ship.invulnerability = 255;
     state->ufo_timer = 30000;
     state->alien_timer = 30000;
+    state->alien_budget = 0;
     state->banner_timer = 0;
 }
 
@@ -2288,12 +2475,15 @@ static void test_ufo_spawn_and_flight(void) {
     game_step(&state, &no_input);
     ufo = first_enemy(&state, 0);
     CHECK(ufo != NULL);
-    CHECK(ufo->kind == GAME_ENEMY_UFO_LARGE);   /* small UFOs only from wave 7 */
+    CHECK(ufo->kind == GAME_ENEMY_UFO_LARGE);   /* small UFOs only after wave 9 */
+    CHECK(ufo->warn > 90 && !state.ufo_present);   /* it is announced at the edge first */
+    end_warnings(&state);
+    game_step(&state, &no_input);
     CHECK(state.ufo_present);
     /* enters from a side edge at 1.0-1.5 px/frame (x0.48) */
     CHECK(ufo->x < (1L << 16) || ufo->x > ((320L - 2) << 16));
     CHECK((ufo->vx > 31000 && ufo->vx < 47500) || (ufo->vx < -31000 && ufo->vx > -47500));
-    CHECK(state.ufo_timer > 300);   /* the next one is a while away */
+    CHECK(state.ufo_timer > 400);   /* the next one is a while away */
 
     for (frame = 0; frame < 1000; ++frame) {
         keep_ship_safe(&state);
@@ -2321,15 +2511,16 @@ static void test_ufo_shots_and_points(void) {
     state.ufo_timer = 1;
     game_step(&state, &no_input);
     ufo = first_enemy(&state, 0);
+    end_warnings(&state);
     state.score = 0;
     shoot_enemy(&state, ufo);
     game_step(&state, &no_input);
     CHECK(state.score == 200);
     CHECK(enemy_count(&state, 0) == 0);
 
-    /* small UFO (wave 7+): 1000 points, and it aims at the ship */
-    quiet_playing(&state, 8);
-    for (frame = 0; frame < 40 && !first_enemy(&state, GAME_ENEMY_UFO_SMALL); ++frame) {
+    /* small UFO (wave 10+): 1000 points, and it aims at the ship */
+    quiet_playing(&state, 12);
+    for (frame = 0; frame < 80 && !first_enemy(&state, GAME_ENEMY_UFO_SMALL); ++frame) {
         state.ufo_timer = 1;
         game_step(&state, &no_input);
         if (first_enemy(&state, GAME_ENEMY_UFO_LARGE) != NULL) {
@@ -2338,6 +2529,7 @@ static void test_ufo_shots_and_points(void) {
     }
     ufo = first_enemy(&state, GAME_ENEMY_UFO_SMALL);
     CHECK(ufo != NULL);
+    end_warnings(&state);
     if (ufo != NULL) {
         ufo->timer = 1;
         ufo->x = 40L << 16;
@@ -2365,61 +2557,109 @@ static void test_ufo_shots_and_points(void) {
     }
 }
 
+/* Run the alien director n times (one event each, with the timer forced due) and report which kinds came. */
+static void run_director(GameState *state, int events) {
+    int event;
+
+    for (event = 0; event < events; ++event) {
+        state->alien_timer = 1;
+        state->alien_budget = 9;
+        keep_ship_safe(state);
+        game_step(state, &no_input);
+    }
+}
+
 static void test_alien_waves_and_gates(void) {
     GameState state;
     int frame;
 
     /* nothing before wave 3 */
     quiet_playing(&state, 2);
-    state.alien_timer = 1;
-    game_step(&state, &no_input);
+    run_director(&state, 3);
     CHECK(enemy_count(&state, 0) == 0);
 
-    /* wave 3: brown aliens only */
+    /* wave 3: brown aliens only, and the first wave's cap is a single unit at a time */
     quiet_playing(&state, 3);
-    state.alien_timer = 1;
-    game_step(&state, &no_input);
+    run_director(&state, 1);
     CHECK(enemy_count(&state, GAME_ENEMY_BROWN) == 1);
     CHECK(enemy_count(&state, GAME_ENEMY_GREEN) == 0);
-    for (frame = 0; frame < 4; ++frame) {
-        state.alien_timer = 1;
-        keep_ship_safe(&state);
-        game_step(&state, &no_input);
-    }
-    CHECK(enemy_count(&state, GAME_ENEMY_BROWN) == 3);   /* at most three */
+    run_director(&state, 4);
+    CHECK(enemy_count(&state, GAME_ENEMY_BROWN) == 1);   /* one unit out at once before wave 7 */
+    CHECK(state.alien_timer == 100);                     /* nothing may come: it looks again soon */
 
-    /* wave 6 adds green men (two at most), wave 8 the blue sentinel, wave 12 swarms of three */
-    quiet_playing(&state, 6);
-    for (frame = 0; frame < 8; ++frame) {
-        state.alien_timer = 1;
-        keep_ship_safe(&state);
+    /* the new alien arrives with a warning: harmless at the edge until it flies in */
+    quiet_playing(&state, 3);
+    run_director(&state, 1);
+    {
+        const GameEnemy *brown = first_enemy(&state, GAME_ENEMY_BROWN);
+        const long x_before = brown->x;
+
+        CHECK(brown->warn > 90 && brown->warn <= 100);
+        for (frame = 0; frame < 50; ++frame) {
+            keep_ship_safe(&state);
+            game_step(&state, &no_input);
+        }
+        CHECK(brown->warn > 0 && brown->warn < 60);
+        CHECK(brown->x == x_before);                      /* it has not moved */
+        shoot_enemy(&state, (GameEnemy *) brown);
         game_step(&state, &no_input);
+        CHECK(brown->active);                             /* and cannot be shot */
+        for (frame = 0; frame < 60; ++frame) {
+            keep_ship_safe(&state);
+            game_step(&state, &no_input);
+        }
+        CHECK(brown->warn == 0);
+        CHECK(brown->x != x_before);                      /* now it flies */
     }
-    CHECK(enemy_count(&state, GAME_ENEMY_GREEN) == 2);
+
+    /* two units from wave 7 on: greens appear then, at most one (two from wave 16), blues from wave 11 */
+    quiet_playing(&state, 7);
+    for (frame = 0; frame < 40; ++frame) {
+        run_director(&state, 1);
+    }
+    CHECK(enemy_count(&state, GAME_ENEMY_GREEN) <= 1);
+    CHECK(enemy_count(&state, GAME_ENEMY_BROWN) + enemy_count(&state, GAME_ENEMY_GREEN) <= 2);
     CHECK(enemy_count(&state, GAME_ENEMY_BLUE) == 0);
-
-    quiet_playing(&state, 8);
-    for (frame = 0; frame < 8; ++frame) {
-        state.alien_timer = 1;
-        keep_ship_safe(&state);
-        game_step(&state, &no_input);
-    }
-    CHECK(enemy_count(&state, GAME_ENEMY_BLUE) == 1);
     CHECK(enemy_count(&state, GAME_ENEMY_PURPLE) == 0);
 
-    quiet_playing(&state, 12);
-    state.alien_timer = 1;
-    game_step(&state, &no_input);
-    CHECK(enemy_count(&state, GAME_ENEMY_PURPLE) == 3);
+    quiet_playing(&state, 11);
     {
-        const GameEnemy *first = first_enemy(&state, GAME_ENEMY_PURPLE);
-        int index;
-        for (index = 0; index < GAME_MAX_ENEMIES; ++index) {
-            if (state.enemies[index].active && state.enemies[index].kind == GAME_ENEMY_PURPLE) {
-                CHECK(state.enemies[index].flock == first->flock);
-            }
+        int saw_blue = 0;
+
+        for (frame = 0; frame < 200; ++frame) {
+            memset(state.enemies, 0, sizeof(state.enemies));
+            run_director(&state, 1);
+            saw_blue |= enemy_count(&state, GAME_ENEMY_BLUE) > 0;
+            CHECK(enemy_count(&state, GAME_ENEMY_PURPLE) == 0);
+            CHECK(enemy_count(&state, 0) <= 2);   /* the global cap before wave 12 */
         }
+        CHECK(saw_blue);
     }
+
+    quiet_playing(&state, 14);
+    {
+        int saw_purple = 0;
+
+        for (frame = 0; frame < 200; ++frame) {
+            memset(state.enemies, 0, sizeof(state.enemies));
+            run_director(&state, 1);
+            saw_purple |= enemy_count(&state, GAME_ENEMY_PURPLE) == 3;
+        }
+        CHECK(saw_purple);
+    }
+
+    /* a wave has a budget of events: 2 + wave / 3, at most 7 */
+    init_playing(&state);
+    CHECK(state.alien_budget == 2);
+    memset(state.asteroids, 0, sizeof(state.asteroids));
+    state.wave = 8;
+    step_to_next_wave(&state);
+    CHECK(state.wave == 9 && state.alien_budget == 5);
+    memset(state.asteroids, 0, sizeof(state.asteroids));
+    state.wave = 28;
+    step_to_next_wave(&state);
+    CHECK(state.wave == 29 && state.alien_budget == 7);
+    CHECK(state.alien_timer == 500);   /* the first event is 10 s into the wave */
 }
 
 static long distance_between(const GameEnemy *enemy, const GameShip *ship) {
@@ -2437,8 +2677,7 @@ static void test_brown_alien_chases(void) {
     int hit = 0;
 
     quiet_playing(&state, 3);
-    state.alien_timer = 1;
-    game_step(&state, &no_input);
+    game_spawn_enemy_now(&state, GAME_ENEMY_BROWN);
     alien = first_enemy(&state, GAME_ENEMY_BROWN);
     CHECK(alien != NULL);
     start_distance = distance_between(alien, &state.ship);
@@ -2457,8 +2696,7 @@ static void test_brown_alien_chases(void) {
 
     /* touching it costs a life; killing it scores 300 */
     quiet_playing(&state, 3);
-    state.alien_timer = 1;
-    game_step(&state, &no_input);
+    game_spawn_enemy_now(&state, GAME_ENEMY_BROWN);
     alien = first_enemy(&state, GAME_ENEMY_BROWN);
     state.ship.invulnerability = 0;
     alien->x = state.ship.x;
@@ -2467,8 +2705,7 @@ static void test_brown_alien_chases(void) {
     CHECK(state.lives == 2);
 
     quiet_playing(&state, 3);
-    state.alien_timer = 1;
-    game_step(&state, &no_input);
+    game_spawn_enemy_now(&state, GAME_ENEMY_BROWN);
     state.score = 0;
     shoot_enemy(&state, first_enemy(&state, GAME_ENEMY_BROWN));
     game_step(&state, &no_input);
@@ -2482,8 +2719,7 @@ static void test_green_alien_shoots_and_takes_two_hits(void) {
     int aimed_bullets = 0;
 
     quiet_playing(&state, 6);
-    state.alien_timer = 1;
-    game_step(&state, &no_input);
+    game_spawn_enemy_now(&state, GAME_ENEMY_GREEN);
     alien = first_enemy(&state, GAME_ENEMY_GREEN);
     CHECK(alien != NULL);
     CHECK(alien->hp == 2);
@@ -2522,8 +2758,7 @@ static void test_blue_sentinel(void) {
     int max_bullets = 0;
 
     quiet_playing(&state, 8);
-    state.alien_timer = 1;
-    game_step(&state, &no_input);
+    game_spawn_enemy_now(&state, GAME_ENEMY_BLUE);
     alien = first_enemy(&state, GAME_ENEMY_BLUE);
     CHECK(alien != NULL);
     CHECK(alien->hp == 2);
@@ -2583,9 +2818,8 @@ static void test_purple_swarm(void) {
     long ship_distance_at_end = 0;
     int members = 0;
 
-    quiet_playing(&state, 12);
-    state.alien_timer = 1;
-    game_step(&state, &no_input);
+    quiet_playing(&state, 14);
+    game_spawn_enemy_now(&state, GAME_ENEMY_PURPLE);
     CHECK(enemy_count(&state, GAME_ENEMY_PURPLE) == 3);
     for (frame = 0; frame < 300; ++frame) {
         keep_ship_safe(&state);
@@ -2676,12 +2910,12 @@ static void test_wave_waits_for_enemies(void) {
     CHECK(state.wave == 1);
     CHECK(enemy_count(&state, 0) == 1);
     memset(state.enemies, 0, sizeof(state.enemies));
-    game_step(&state, &no_input);
+    step_to_next_wave(&state);
     CHECK(state.wave == 2);
 }
 
 static void test_boss_waves(void) {
-    static const int expected_hp[] = {0, 0, 0, 0, 0, 9, 0, 0, 0, 0, 19, 0, 0, 0, 0, 18, 0, 0, 0, 0, 41};
+    static const int expected_hp[] = {0, 0, 0, 0, 0, 14, 0, 0, 0, 0, 19, 0, 0, 0, 0, 18, 0, 0, 0, 0, 41};
     GameState state;
     int wave;
     int frame;
@@ -2689,7 +2923,7 @@ static void test_boss_waves(void) {
     for (wave = 5; wave <= 20; wave += 5) {
         quiet_playing(&state, wave - 1);
         memset(state.asteroids, 0, sizeof(state.asteroids));
-        game_step(&state, &no_input);
+        step_to_next_wave(&state);
         CHECK(state.wave == wave);
         CHECK(state.boss.active);
         CHECK(state.boss.kind == 1 + (wave / 5 - 1) % 4);
@@ -2731,6 +2965,7 @@ static void test_boss_waves(void) {
         {
             int hits = 0;
             while (state.boss.active && hits < 100) {
+                memset(state.enemies, 0, sizeof(state.enemies));   /* a minion on top of the boss would take the shot */
                 state.bullets[0].active = 1;
                 state.bullets[0].life = 4;
                 state.bullets[0].x = state.boss.x;
@@ -2763,7 +2998,7 @@ static void test_boss_hurts_the_ship(void) {
 
     quiet_playing(&state, 4);
     memset(state.asteroids, 0, sizeof(state.asteroids));
-    game_step(&state, &no_input);
+    step_to_next_wave(&state);
     CHECK(state.boss.active);
     state.boss.entered = 1;
     state.boss.x = state.ship.x;
@@ -2778,7 +3013,7 @@ static void test_boss_hit_flash_and_sound(void) {
 
     quiet_playing(&state, 4);
     memset(state.asteroids, 0, sizeof(state.asteroids));
-    game_step(&state, &no_input);
+    step_to_next_wave(&state);
     state.boss.entered = 1;
     state.boss.x = 100L << 16;
     state.boss.y = 60L << 16;
@@ -2790,6 +3025,283 @@ static void test_boss_hit_flash_and_sound(void) {
     game_step(&state, &no_input);
     CHECK(state.boss.flash > 0);
     CHECK(events_contain_bit(game_take_sound_events(&state), SFX_BOSS_HIT));
+}
+
+
+/* ---- tests: the Lovable balance pass ---- */
+
+static void test_wave_clear_bonus_and_position(void) {
+    GameState state;
+    int index;
+
+    /* clearing a wave pays wave x 100, and 500 more if no life was lost; the multiplier does not double it */
+    quiet_playing(&state, 7);
+    memset(state.asteroids, 0, sizeof(state.asteroids));
+    state.multiplier_timer = 500;
+    state.score = 0;
+    game_step(&state, &no_input);
+    CHECK(state.clear_bonus == 1200 && state.score == 1200 && state.wave_clear_timer == 75);
+
+    quiet_playing(&state, 7);
+    memset(state.asteroids, 0, sizeof(state.asteroids));
+    state.life_lost_this_wave = 1;
+    state.score = 0;
+    game_step(&state, &no_input);
+    CHECK(state.clear_bonus == 700 && state.score == 700);
+
+    quiet_playing(&state, 26);
+    memset(state.asteroids, 0, sizeof(state.asteroids));
+    state.score = 0;
+    game_step(&state, &no_input);
+    CHECK(state.clear_bonus == 2500);   /* capped at wave 20 */
+
+    /* during the pause nothing new turns up, and the wave only starts when it is over */
+    quiet_playing(&state, 7);
+    memset(state.asteroids, 0, sizeof(state.asteroids));
+    game_step(&state, &no_input);
+    state.ufo_timer = 1;
+    state.alien_timer = 1;
+    state.alien_budget = 5;
+    for (index = 0; index < 60; ++index) {
+        game_step(&state, &no_input);
+    }
+    CHECK(state.wave == 7 && enemy_count(&state, 0) == 0);
+
+    /* the ship keeps its place and speed into the next wave, the new rocks keep away from it */
+    quiet_playing(&state, 6);
+    memset(state.asteroids, 0, sizeof(state.asteroids));
+    state.ship.x = 40L << 16;
+    state.ship.y = 30L << 16;
+    state.ship.vx = 20000;
+    state.ship.vy = -10000;
+    for (index = 0; index < 120 && state.wave == 6; ++index) {
+        state.ship.x = 40L << 16;
+        state.ship.y = 30L << 16;
+        game_step(&state, &no_input);
+    }
+    CHECK(state.wave == 7);
+    CHECK(state.ship.x == (40L << 16) + 20000 * 0 || state.ship.x > (39L << 16));
+    CHECK(state.ship.y < (60L << 16));
+    CHECK(count_asteroids(&state, GAME_ASTEROID_LARGE) == 18);
+    for (index = 0; index < GAME_MAX_ASTEROIDS; ++index) {
+        if (state.asteroids[index].active) {
+            long dx = (state.asteroids[index].x - state.ship.x) >> 16;
+            long dy = (state.asteroids[index].y - state.ship.y) >> 16;
+            if (dx > 160) dx -= 320;
+            if (dx < -160) dx += 320;
+            if (dy > 120) dy -= 240;
+            if (dy < -120) dy += 240;
+            CHECK(dx * dx + dy * dy >= 80L * 80L);   /* 88 px, less what the rock has drifted in a frame */
+        }
+    }
+}
+
+static void test_respawn_at_a_quiet_spot(void) {
+    GameState state;
+    int trial;
+    int index;
+
+    for (trial = 0; trial < 20; ++trial) {
+        long closest = 100000;
+
+        quiet_playing(&state, 4);
+        memset(state.asteroids, 0, sizeof(state.asteroids));
+        state.rng_state += (uint32_t) trial * 7919u;
+        /* a ring of big rocks round the middle and a few more: the quietest place is somewhere out at the edges */
+        for (index = 0; index < 8; ++index) {
+            state.asteroids[index].active = 1;
+            state.asteroids[index].size = GAME_ASTEROID_LARGE;
+            state.asteroids[index].point_count = 8;
+            state.asteroids[index].x = (long) (160 + (index % 2 ? 50 : -50) + (index / 2) * 6) << 16;
+            state.asteroids[index].y = (long) (60 + (index / 2) * 40) << 16;
+            state.asteroids[index].vx = 8000;
+        }
+        state.ship.invulnerability = 0;
+        state.ship.x = state.asteroids[0].x;
+        state.ship.y = state.asteroids[0].y;
+        game_step(&state, &no_input);
+        CHECK(state.lives == 2);
+        CHECK(state.ship.invulnerability == 100);
+        CHECK(state.ship.vx == 0 && state.ship.vy == 0);
+        for (index = 0; index < 8; ++index) {
+            const long distance = distance_squared(state.ship.x, state.ship.y, state.asteroids[index].x, state.asteroids[index].y);
+            closest = distance < closest ? distance : closest;
+        }
+        CHECK(closest > 40L * 40L);   /* clear of every rock by a good margin */
+    }
+}
+
+static void test_green_alien_balance(void) {
+    GameState state;
+    GameEnemy *alien;
+    int frame;
+    int index;
+    int max_alive = 0;
+    int shots = 0;
+
+    quiet_playing(&state, 7);
+    game_spawn_enemy_now(&state, GAME_ENEMY_GREEN);
+    alien = first_enemy(&state, GAME_ENEMY_GREEN);
+    CHECK(alien->timer >= 100 && alien->timer < 150);   /* a slower start */
+    alien->x = 100L << 16;
+    alien->y = 40L << 16;
+    alien->vx = 0;
+    alien->timer = 1;
+    state.ship.x = 200L << 16;
+    state.ship.y = 160L << 16;
+    game_step(&state, &no_input);
+    for (index = 0; index < GAME_MAX_ENEMY_BULLETS; ++index) {
+        const GameBullet *bullet = &state.enemy_bullets[index];
+        if (bullet->active && bullet->color == GAME_COLOR_SHIP) {
+            const long vx = bullet->vx >> 8;
+            const long vy = bullet->vy >> 8;
+            CHECK(vx * vx + vy * vy > 540L * 540L && vx * vx + vy * vy < 565L * 565L);   /* 4.5 px/tick: 553 in 8.8 */
+            CHECK(bullet->life == 46);                                                  /* a shorter range than before */
+            ++shots;
+        }
+    }
+    CHECK(shots == 1);
+    CHECK(alien->timer >= 75 + 0 && alien->timer < 200);
+
+    /* at most three of its shots at a time, and none while it is at the very edge of the field */
+    for (frame = 0; frame < 600; ++frame) {
+        int alive = 0;
+        alien->timer = alien->timer > 2 ? 2 : alien->timer;
+        keep_ship_safe(&state);
+        game_step(&state, &no_input);
+        for (index = 0; index < GAME_MAX_ENEMY_BULLETS; ++index) {
+            alive += (state.enemy_bullets[index].active && state.enemy_bullets[index].color == GAME_COLOR_SHIP);
+        }
+        max_alive = alive > max_alive ? alive : max_alive;
+        if (!alien->active) {
+            break;
+        }
+    }
+    CHECK(max_alive <= 3);
+
+    quiet_playing(&state, 7);
+    game_spawn_enemy_now(&state, GAME_ENEMY_GREEN);
+    alien = first_enemy(&state, GAME_ENEMY_GREEN);
+    alien->x = 3L << 16;
+    alien->vx = 0;
+    alien->timer = 1;
+    game_step(&state, &no_input);
+    CHECK(enemy_bullet_count(&state) == 0);   /* off to the side it holds its fire (and the timer waits at 1) */
+    CHECK(alien->timer == 1);
+}
+
+static void test_blue_sentinel_balance(void) {
+    GameState state;
+    GameEnemy *alien;
+    int frame;
+    int teleports = 0;
+    int far_enough = 1;
+
+    quiet_playing(&state, 12);
+    game_spawn_enemy_now(&state, GAME_ENEMY_BLUE);
+    alien = first_enemy(&state, GAME_ENEMY_BLUE);
+    CHECK(alien->timer2 >= 350 && alien->timer2 < 500);   /* the first teleport is some time off */
+    state.ship.x = 160L << 16;
+    state.ship.y = 120L << 16;
+    for (frame = 0; frame < 1700 && alien->active; ++frame) {
+        const long before_x = alien->x;
+        const long before_y = alien->y;
+
+        state.ship.x = 160L << 16;
+        state.ship.y = 120L << 16;
+        keep_ship_safe(&state);
+        game_step(&state, &no_input);
+        if (!alien->active) {
+            break;
+        }
+        if (labs(alien->x - before_x) > (30L << 16) || labs(alien->y - before_y) > (30L << 16)) {
+            const long dx = (alien->x - state.ship.x) >> 16;
+            const long dy = (alien->y - state.ship.y) >> 16;
+
+            ++teleports;
+            far_enough &= (dx * dx + dy * dy >= 80L * 80L);   /* 88 px, from the ship */
+            CHECK(alien->x >= (20L << 16) && alien->x <= (300L << 16));
+        }
+        memset(state.enemy_bullets, 0, sizeof(state.enemy_bullets));
+    }
+    CHECK(teleports >= 2 && teleports <= 5);   /* about every 7-10 s, no longer every few seconds */
+    CHECK(far_enough);
+    CHECK(!alien->active);                      /* and after 30 s it teleports away for good */
+    CHECK(frame < 1700);
+}
+
+static void test_boing_ball_stages(void) {
+    GameState state;
+    int frame;
+    int max_stage = 0;
+    int saw_floor_shots = 0;
+    int saw_hover = 0;
+    int saw_drop = 0;
+    int stage_changes = 0;
+    int last_stage = 0;
+
+    quiet_playing(&state, 4);
+    memset(state.asteroids, 0, sizeof(state.asteroids));
+    step_to_next_wave(&state);
+    CHECK(state.boss.kind == GAME_BOSS_AMIGA_BALL);
+    CHECK(state.boss.hp == 14 && state.boss.max_hp == 14);   /* (3 + wave) x 1.8 */
+    CHECK(state.ship.invulnerability >= 99);                 /* a longer grace at the start of a boss fight */
+    state.boss.max_hp = 100;
+    state.boss.hp = 100;
+
+    for (frame = 0; frame < 2400; ++frame) {
+        int index;
+
+        keep_ship_safe(&state);
+        state.ship.x = (frame < 1200 ? 60L : 260L) << 16;
+        state.ship.y = 200L << 16;
+        /* wear it down steadily through the three stages */
+        if (frame % 8 == 0 && state.boss.hp > 3 && state.boss.entered) {
+            --state.boss.hp;
+        }
+        game_step(&state, &no_input);
+        if (!state.boss.active) {
+            break;
+        }
+        if (state.boss.entered) {
+            CHECK(state.boss.x >= (23L << 16) && state.boss.x <= (297L << 16));
+            CHECK(state.boss.y >= (15L << 16) && state.boss.y <= (209L << 16));
+        }
+        max_stage = state.boss.stage > max_stage ? state.boss.stage : max_stage;
+        if (state.boss.stage != last_stage) {
+            ++stage_changes;
+            last_stage = state.boss.stage;
+            CHECK(state.boss.stage_flash > 0);
+        }
+        saw_hover |= state.boss.dash_state == 1;
+        saw_drop |= state.boss.dash_state == 2;
+        for (index = 0; index < GAME_MAX_ENEMY_BULLETS; ++index) {
+            const GameBullet *bullet = &state.enemy_bullets[index];
+            if (bullet->active && bullet->y == (220L << 16) && bullet->vy == 0) {
+                saw_floor_shots = 1;
+            }
+        }
+    }
+    CHECK(max_stage == 2 && stage_changes == 2);   /* two changes: at 66% and 40% of its hit points */
+    CHECK(saw_floor_shots);                        /* every landing sends a shockwave along the floor */
+    CHECK(saw_hover && saw_drop);                  /* and in the last stage it hovers over the ship and drops */
+}
+
+static void test_game_over_ignores_held_fire(void) {
+    GameState state;
+    GameInput fire = {0, 0, 0, 1, 0, 0, 0, 0, 0, 0, 1, 0, 0};
+    int frame;
+
+    quiet_playing(&state, 1);
+    state.lives = 1;
+    state.ship.invulnerability = 0;
+    put_rock_on_ship(&state, GAME_ASTEROID_LARGE);
+    game_step(&state, &fire);   /* fire held all the way from the game into the Game Over screen */
+    CHECK(state.mode == GAME_MODE_GAME_OVER);
+    for (frame = 0; frame < 100; ++frame) {
+        game_step(&state, &fire);
+    }
+    CHECK(state.mode == GAME_MODE_GAME_OVER);   /* it stays up: held fire does not skip it */
 }
 
 static int offset_calls;
@@ -3002,7 +3514,7 @@ static void test_enemy_rendering(void) {
     for (kind = GAME_BOSS_AMIGA_BALL; kind <= GAME_BOSS_BORG_CUBE; ++kind) {
         quiet_playing(&state, kind * 5 - 1);
         memset(state.asteroids, 0, sizeof(state.asteroids));
-        game_step(&state, &no_input);
+        step_to_next_wave(&state);
         CHECK(state.boss.kind == kind);
         state.boss.entered = 1;
         for (frame = 0; frame < 300; ++frame) {
@@ -3084,6 +3596,7 @@ int main(void) {
     test_game_over_and_initials_screens();
     test_banner_and_playing_screen();
     test_powerup_drops();
+    test_powerup_economy();
     test_powerup_expires_and_wraps();
     test_powerup_shield();
     test_powerup_rapid_fire();
@@ -3103,6 +3616,12 @@ int main(void) {
     test_boss_waves();
     test_boss_hurts_the_ship();
     test_boss_hit_flash_and_sound();
+    test_wave_clear_bonus_and_position();
+    test_respawn_at_a_quiet_spot();
+    test_green_alien_balance();
+    test_blue_sentinel_balance();
+    test_boing_ball_stages();
+    test_game_over_ignores_held_fire();
     test_enemy_rendering();
     test_rock_offset_route();
     test_escape_pauses_and_leaves();

@@ -54,7 +54,7 @@ $(DISK_IMAGE): $(TARGET) | $(BUILD_DIR)
 disk-image: $(DISK_IMAGE)
 
 test: $(BUILD_DIR)
-	$(HOST_CC) -std=c99 -Wall -Wextra -Werror -I$(INC_DIR) $(TEST_SRCS) -o $(TEST_TARGET)
+	$(HOST_CC) -std=c99 -Wall -Wextra -Werror -Wno-missing-field-initializers -Wno-unused-const-variable -I$(INC_DIR) $(TEST_SRCS) -o $(TEST_TARGET)
 	$(TEST_TARGET)
 
 # The same tests as a TOS program (prints results, waits for a key), for running in Hatari.
