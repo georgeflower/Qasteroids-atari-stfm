@@ -12,10 +12,12 @@
 
 	.globl	Super			| void *Super(void *ssp)  GEMDOS 0x20
 Super:
-	move.l	4(%sp),-(%sp)
+	SAVE
+	move.l	12(%sp),-(%sp)
 	move.w	#0x20,-(%sp)
 	trap	#1
 	addq.l	#6,%sp
+	RESTORE
 	rts
 
 	.globl	Getrez			| int Getrez(void)  XBIOS 4

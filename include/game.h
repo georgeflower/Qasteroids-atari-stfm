@@ -89,7 +89,7 @@ typedef struct GameInput {
     uint8_t fire_alt;       /* fire that is not the space bar: joystick button, Ctrl, Alt */
     uint8_t typed;          /* a letter typed on the keyboard since the last step ('A' - 'Z'), else 0; one step only */
     uint8_t backspace;      /* Backspace pressed since the last step; one step only */
-} GameInput;
+} __attribute__((aligned(2))) GameInput;   /* all-byte struct: without this it may sit at an odd address, and gcc copies it with move.l (address error on a 68000) */
 
 typedef struct GameShip {
     int32_t x;
