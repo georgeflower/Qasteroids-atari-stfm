@@ -44,7 +44,7 @@ The implementation direction was adjusted using the `Atari_ST_Sources` archive a
 
 ### Controls
 
-Keyboard, and a joystick in either joystick port (the ST reports them through the keyboard processor; both ports work at once):
+Keyboard, and a joystick in joystick port 1 (the ST reports it through the keyboard processor). Port 0 is the mouse port and is ignored, so a mouse plugged in there cannot steer the ship:
 
 | action | keyboard | joystick |
 |---|---|---|

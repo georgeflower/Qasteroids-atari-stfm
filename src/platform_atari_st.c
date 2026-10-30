@@ -224,16 +224,24 @@ int platform_init(void) {
 
 void platform_shutdown(void) {
     /* Joystick events first, relative mouse last: a joystick command stops port 0 being scanned as a
-       mouse until the next mouse command, so ending with 0x14 leaves the GEM pointer dead. */
+       mouse until the next mouse command, so ending with 0x14 leaves the GEM pointer dead.
+       The commands go out while our handler is still installed, and then we wait a few frames: a joystick packet
+       that is already on its way is read (and skipped) by our handler, so the TOS handler never gets half a packet
+       and loses its place. Only then does TOS get its handler back, and the mouse command is repeated for good measure. */
     static const char ikbd_tos_mode[] = { 0x14, 0x08 };
+    static const char ikbd_mouse_on[] = { 0x08 };
     int i;
 
     if (!entered_supervisor) {
         return;
     }
 
-    st_ikbd_remove();
     (void) Ikbdws(1, ikbd_tos_mode);
+    wait_vbl();
+    wait_vbl();
+    wait_vbl();
+    st_ikbd_remove();
+    (void) Ikbdws(0, ikbd_mouse_on);
     Setscreen(original_logbase, original_physbase, original_resolution);
     wait_vbl();
     wait_vbl();
@@ -263,7 +271,9 @@ static char letter_for_scancode(unsigned scancode) {
 }
 
 void platform_poll_input(GameInput *input) {
-    const unsigned char joystick = (unsigned char) (st_joystick[0] | st_joystick[1]);   /* either port */
+    /* Joystick port 1 only. Port 0 is the mouse port: with the keyboard processor in joystick mode a mouse plugged in
+       there looks like a joystick whose direction lines flicker or stay stuck (up is thrust), so it is ignored. */
+    const unsigned char joystick = st_joystick[1];
 
     memset(input, 0, sizeof(*input));
 
