@@ -333,7 +333,11 @@ static void spawn_asteroid(GameState *state, uint8_t size, int32_t x, int32_t y)
         memcpy(asteroid->radius, shared.radius, sizeof(asteroid->radius));
     }
     asteroid->angle = game_rand16(state);
-    asteroid->spin = (int16_t) (game_rand_below(state, 501) - 250);
+    {
+        const int spin = game_rand_below(state, 501) - 250;
+
+        asteroid->spin = (int16_t) (spin < 0 ? -96 - (-spin >> 1) : 96 + (spin >> 1));
+    }
 
     /* large rocks vary 0.3..1.5x, the others 0.8..1.2x */
     variance = (size == GAME_ASTEROID_LARGE) ? 77 + game_rand_below(state, 308) : 205 + game_rand_below(state, 103);

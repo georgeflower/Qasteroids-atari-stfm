@@ -337,6 +337,55 @@ static void test_asteroid_shapes(void) {
     }
 }
 
+static void test_asteroid_rotation(void) {
+    GameState state;
+    int seed;
+    int clockwise = 0;
+    int anticlockwise = 0;
+    int8_t first_x[GAME_MAX_ASTEROID_POINTS];
+
+    for (seed = 1; seed <= 16; ++seed) {
+        int index;
+
+        game_init(&state, FIELD_X, FIELD_Y, FIELD_W, FIELD_H);
+        state.rng_state = (uint32_t) seed;
+        game_start(&state);
+        for (index = 0; index < GAME_MAX_ASTEROIDS; ++index) {
+            const GameAsteroid *rock = &state.asteroids[index];
+
+            if (rock->active) {
+                CHECK((rock->spin >= 96 && rock->spin <= 221) ||
+                      (rock->spin <= -96 && rock->spin >= -221));
+                clockwise |= rock->spin > 0;
+                anticlockwise |= rock->spin < 0;
+            }
+        }
+    }
+    CHECK(clockwise && anticlockwise);
+
+    memset(state.asteroids, 0, sizeof(state.asteroids));
+    game_rock_shape(GAME_ASTEROID_LARGE, 0, &state.asteroids[0]);
+    state.asteroids[0].active = 1;
+    state.asteroids[0].x = 160L << GAME_FIX_SHIFT;
+    state.asteroids[0].y = 100L << GAME_FIX_SHIFT;
+    game_prepare_rock(&state, &state.asteroids[0]);
+    memcpy(first_x, state.asteroids[0].off_x, sizeof(first_x));
+
+    state.asteroids[0].angle = 16300;
+    state.asteroids[0].spin = 128;
+    game_update_rocks_ref(&state);
+    game_prepare_rock(&state, &state.asteroids[0]);
+    CHECK(state.asteroids[0].cache_index == 16);
+    CHECK(memcmp(first_x, state.asteroids[0].off_x, sizeof(first_x)) != 0);
+
+    state.asteroids[0].angle = 0;
+    state.asteroids[0].spin = -128;
+    game_update_rocks_ref(&state);
+    game_prepare_rock(&state, &state.asteroids[0]);
+    CHECK(state.asteroids[0].cache_index == 48);
+    CHECK(memcmp(first_x, state.asteroids[0].off_x, sizeof(first_x)) != 0);
+}
+
 static void test_bullet_breaks_asteroids_and_scores(void) {
     GameState state;
     const int expected_score[] = {0, 100, 50, 20};
@@ -3570,6 +3619,7 @@ int main(void) {
     test_no_autopilot();
     test_wave_sizes();
     test_asteroid_shapes();
+    test_asteroid_rotation();
     test_bullet_breaks_asteroids_and_scores();
     test_ship_wraps_across_screen();
     test_turning_speed();

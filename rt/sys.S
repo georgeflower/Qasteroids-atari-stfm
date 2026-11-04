@@ -37,6 +37,7 @@ Physbase:
 	trap	#14
 	addq.l	#2,%sp
 	RESTORE
+	move.l	%d0,%a0			| Linux m68k ABI returns pointers in a0
 	rts
 
 	.globl	Logbase			| void *Logbase(void)  XBIOS 3
@@ -46,6 +47,7 @@ Logbase:
 	trap	#14
 	addq.l	#2,%sp
 	RESTORE
+	move.l	%d0,%a0
 	rts
 
 	.globl	Setscreen		| void Setscreen(void *log, void *phys, int rez)  XBIOS 5

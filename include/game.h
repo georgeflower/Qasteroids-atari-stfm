@@ -20,9 +20,9 @@
 /* Rocks share a small set of outlines per size (as in the arcade original), so a drawer can prepare each one
    ahead of time. The rock turns through 1 << GAME_ROCK_ORIENT_BITS steps of the 64 the game knows; 0 means it
    keeps one orientation. */
-#define GAME_ROCK_SHAPES 4
-#define GAME_ROCK_SHAPE_BITS 2
-#define GAME_ROCK_ORIENT_BITS 0
+#define GAME_ROCK_SHAPES 1
+#define GAME_ROCK_SHAPE_BITS 0
+#define GAME_ROCK_ORIENT_BITS 2
 #define GAME_ROCK_ORIENT_MASK (0x3f & ~((1 << (6 - GAME_ROCK_ORIENT_BITS)) - 1))
 #define GAME_DRAW_CACHE_WORDS (3 + 6 * GAME_MAX_ASTEROID_POINTS)   /* room the platform may use per rock */
 #define GAME_MAX_POWERUPS 4

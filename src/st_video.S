@@ -150,7 +150,7 @@ cr6:	movem.l	%d0-%d5,(%a0)
 	bra.w	crnext
 cr7:	movem.l	%d0-%d5,(%a0)
 	movem.l	%d0-%d5,24(%a0)
-	movem.l	%d0-%d3,48(%a0)
+	movem.l	%d0-%d1,48(%a0)
 	lea	160(%a0),%a0
 	dbra	%d7,cr7
 	bra.w	crnext

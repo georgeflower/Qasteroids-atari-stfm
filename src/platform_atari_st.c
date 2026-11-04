@@ -332,7 +332,7 @@ void platform_clear_field(void *context) {
 #define SPRITE_CENTER_ROW 24
 #define SPRITE_CENTER_X 32
 #define SPRITE_GROUPS 5
-#define SPRITE_POOL_WORDS (0x10000UL << GAME_ROCK_ORIENT_BITS)
+#define SPRITE_POOL_WORDS 0x10000UL
 
 static uint16_t *rock_sprites[SPRITE_COUNT];
 static int rock_sprites_ready;
@@ -649,10 +649,11 @@ void platform_draw_rocks(void *context, GameState *state) {
                   rock_sprites_ready ? rock_sprites : NULL);
 }
 
-/* A rock that pokes out of the field (called from st_rocks.S). The generated code is entered at the first row inside
-   the field and stopped after the last one (an rts is patched in for the call); whatever it wrote into the frame
-   columns on the left and right - including the spill into the neighbouring row - is painted over with the frame
-   colour again. */
+extern void st_blit_rock_clipped(const uint16_t *code, const uint16_t *row_offsets, long rows,
+                                 unsigned char *dst_row, long centre_column_bytes, long row_displacement);
+
+/* Vertical clipping enters the generated code at a row boundary. Horizontal clipping applies its
+   four-word immediate instructions individually, so no write can wrap into the next scanline. */
 void platform_draw_rock_clipped(GameAsteroid *rock, long cx, long cy) {
     const int orient = (int) ((rock->angle >> 10) & (unsigned) (GAME_ROCK_ORIENT_MASK)) >> (6 - GAME_ROCK_ORIENT_BITS);
     const int index = ((((rock->size - 1) * GAME_ROCK_SHAPES + (rock->shape - 1)) * SPRITE_ORIENTS +
@@ -678,6 +679,12 @@ void platform_draw_rock_clipped(GameAsteroid *rock, long cx, long cy) {
     if (first > last || g1 < FIELD_GROUP0 || g0 > FIELD_GROUP1) {
         return;
     }
+    if (g0 < FIELD_GROUP0 || g1 > FIELD_GROUP1) {
+        st_blit_rock_clipped(code, offset + first, last - first + 1,
+                             draw_buffer + (top + first) * 160, (cx >> 4) * 8,
+                             (rock->bound_y0 + first) * 160);
+        return;
+    }
     {
         uint16_t *const stop = code + offset[last + 1];
         const uint16_t saved = *stop;
@@ -690,35 +697,23 @@ void platform_draw_rock_clipped(GameAsteroid *rock, long cx, long cy) {
                          : "a0", "a1", "d0", "d1", "d2", "d3", "memory", "cc");
         *stop = saved;
     }
-    if (g0 < FIELD_GROUP0 || g1 > FIELD_GROUP1) {
-        long y = top + first - 1;
-        const long y_end = top + last + 1;
-        unsigned char *row = draw_buffer + y * 160;
-
-        for (; y <= y_end; ++y, row += 160) {
-            uint32_t *const left = (uint32_t *) row;
-            uint32_t *const right = (uint32_t *) (row + 19 * 8);
-
-            left[0] = left[1] = right[0] = right[1] = 0xffff0000u;   /* GAME_COLOR_FRAME is 5: planes 0 and 2 */
-        }
-    }
 }
 
 /* ---- masked sprites (ship, bullets): 16-wide, four planes plus a coverage word per row, shifted at run time ---- */
 
 #include "ship_data.h"
 
-static uint16_t bullet_planar[4][8][5];
+static uint16_t bullet_planar[4][3][5];
 static int bullet_ready;
 
 static void bullet_build(void) {
-    static const char orb[8][9] = {"........", "..hhh...", ".hhwhh..", ".hwwwh..", ".hhwhh..", "..hhh...", "........", "........"};
+    static const char orb[3][4] = {".h.", "hwh", ".h."};
     static const unsigned char halo[4] = {1, 12, 1, 6};
     int f, y, x, p;
 
     for (f = 0; f < 4; ++f) {
-        for (y = 0; y < 8; ++y) {
-            for (x = 0; x < 8; ++x) {
+        for (y = 0; y < 3; ++y) {
+            for (x = 0; x < 3; ++x) {
                 const char c = orb[y][x];
                 const int colour = c == 'w' ? 2 : c == 'h' ? halo[f] : 0;
 
@@ -787,8 +782,8 @@ int platform_draw_sprite(void *context, int kind, int frame, int x, int y) {
         if (!bullet_ready) {
             bullet_build();
         }
-        blit_masked(bullet_planar[frame & 3], 8, x - 3, y - 3);
-        platform_mark_dirty(context, x - 4, y - 4, x + 4, y + 4);
+        blit_masked(bullet_planar[frame & 3], 3, x - 1, y - 1);
+        platform_mark_dirty(context, x - 2, y - 2, x + 2, y + 2);
         return 1;
     }
     return 0;

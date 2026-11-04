@@ -80,5 +80,18 @@ $(DISK_IMAGE): $(TARGET)
 
 disk-image: $(DISK_IMAGE)
 
+.PHONY: test-sprite-clip-atari
+test-sprite-clip-atari: $(BUILD_DIR)/CLIPTEST.PRG
+
+$(BUILD_DIR)/atari_sprite_clip_test.o: tests/atari_sprite_clip_test.c $(INC_DIR)/game.h $(INC_DIR)/platform.h | $(BUILD_DIR)
+	$(CC) $(CFLAGS) -DATARI_ST_TARGET -c $< -o $@
+
+$(BUILD_DIR)/CLIPTEST.elf: $(filter-out $(BUILD_DIR)/main.o,$(OBJS)) $(BUILD_DIR)/atari_sprite_clip_test.o $(RT_DIR)/link.ld
+	$(LD) -T $(RT_DIR)/link.ld --emit-relocs --no-warn-rwx-segments -z noexecstack -o $@ $(filter %.o,$^)
+
+$(BUILD_DIR)/CLIPTEST.PRG: $(BUILD_DIR)/CLIPTEST.elf
+	sh tools/checkalign.sh $<
+	$(PYTHON) tools/elf2prg.py $< $@
+
 clean:
 	rm -rf $(BUILD_DIR)

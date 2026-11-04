@@ -109,7 +109,9 @@ edgesready:
 	moveq	#0,%d1
 	move.b	GA_SIZE(%a3),%d1
 	subq.w	#1,%d1
+	.if ROCK_SHAPE_BITS
 	lsl.w	#ROCK_SHAPE_BITS,%d1
+	.endif
 	moveq	#0,%d0
 	move.b	GA_SHAPE(%a3),%d0
 	subq.w	#1,%d0

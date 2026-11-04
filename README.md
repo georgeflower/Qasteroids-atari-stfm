@@ -183,9 +183,20 @@ Target: a stock 520 STFM (512 KB, `hatari --machine st --memsize 512`; `hatari/r
 writes `build/ubuntu/asteroids-stfm.st`. `shot.sh` env: `HATARI_MEM`, `HATARI_MACHINE`, `TITLE=1` (shoot the title), `PRESS`, `HOLD`.
 
 Demo-scene effects: rocks are pre-rendered shaded, dithered 4-plane sprites compiled to 68000 code at startup (128 KB pool,
-clipped by jumping into the code at the first visible row); the ship (`tools/gen_ship.py` -> `include/ship_data.h`) and glowing
-bullets are masked planar sprites shifted at run time (`src/st_sprite.S`). Explosions are spark streaks that fade white -> yellow ->
+vertically clipped by jumping into the code at the first visible row; side clips restrict every write to the field);
+the ship (`tools/gen_ship.py` -> `include/ship_data.h`) and compact 3x3 glowing bullets are masked planar sprites shifted at run time
+(`src/st_sprite.S`). Explosions are spark streaks that fade white -> yellow ->
 orange -> red plus an expanding shock ring; the title logo is a per-letter sine wave with cycling colours and orbiting sparkles.
 The sky raster gradient was dropped in favour of a flat black field.
+
+Asteroids turn slowly clockwise or anticlockwise using four precomputed headings (90-degree steps).
+One outline per size replaces the four static variants, keeping the sprite count and 128 KB code pool unchanged
+on the 512 KB target. A full turn takes approximately 6-14 seconds at 50 game steps per second.
+
+Sound is silenced before score/settings disk writes, since the frame-driven sound engine cannot advance during disk I/O.
+`make -f Makefile.ubuntu test-sprite-clip-atari` builds `build/ubuntu/CLIPTEST.PRG`; run it in Hatari to write
+`CLIPTEST.LOG`, checking all rectangle-erase widths and all rock sizes, headings and pixel phases at both sides
+and corners against an unclipped reference. The seven-group erase clears exactly 112 pixels; its previous
+128-pixel write could corrupt the right edge on busy waves.
 
 Performance: press F2 in game for "WORK ms / FPS". Measured in Hatari: 50 fps (about 15 ms of work per frame) with 7 large rocks.

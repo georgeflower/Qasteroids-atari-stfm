@@ -72,6 +72,7 @@ int main(void) {
         }
         if (game.scores_changed) {
             game_scores_pack(&game, score_file);
+            sound_silence();
             platform_save_scores(score_file, (int) sizeof(score_file));
             game.scores_changed = 0;
         }
@@ -81,6 +82,7 @@ int main(void) {
             settings_file[1] = 'F';
             settings_file[2] = '1';
             settings_file[3] = game.hyper_on_space;
+            sound_silence();
             platform_save_settings(settings_file, (int) sizeof(settings_file));
             game.settings_changed = 0;
         }
