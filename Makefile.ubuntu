@@ -29,7 +29,7 @@ CFLAGS := -std=c99 -m68000 -mstrict-align -fno-store-merging -O2 -Wall -Wextra -
 ASFLAGS := -m68000 -DSTACK_BYTES=$(STACK_BYTES) -I$(BUILD_DIR)
 
 GAME_SRCS := main game platform_atari_st st_text sound
-GAME_ASMS := st_video st_ikbd st_raster st_rocks st_step
+GAME_ASMS := st_video st_ikbd st_rocks st_sprite st_step
 OBJS := $(BUILD_DIR)/crt0.o \
         $(GAME_SRCS:%=$(BUILD_DIR)/%.o) $(GAME_ASMS:%=$(BUILD_DIR)/%.o) \
         $(BUILD_DIR)/sys.o $(BUILD_DIR)/math.o $(BUILD_DIR)/libc.o

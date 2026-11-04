@@ -242,6 +242,29 @@ typedef struct GameHighScore {
     char initials[4];
 } GameHighScore;
 
+/* Explosion debris: a spark flies off with some drag, shifting from white through yellow and orange to red as it
+   dies; a blast is the expanding shock ring around the explosion. kind picks the colour ramp. */
+#define GAME_MAX_SPARKS 40
+#define GAME_MAX_BLASTS 6
+
+typedef struct GameSpark {
+    int32_t x;             /* screen pixels, 16.16 */
+    int32_t y;
+    int32_t vx;
+    int32_t vy;
+    uint8_t life;          /* frames left */
+    uint8_t life_max;
+    uint8_t kind;
+} GameSpark;
+
+typedef struct GameBlast {
+    int32_t x;
+    int32_t y;
+    uint8_t age;           /* 0 = free, otherwise frames since it began + 1 */
+    uint8_t size;          /* ring growth per frame in quarter pixels */
+    uint8_t kind;
+} GameBlast;
+
 typedef struct GameState {
     /* the playing field rectangle on the screen, and the world -> screen scales (8.8 fixed point) */
     uint16_t field_x;
@@ -286,6 +309,9 @@ typedef struct GameState {
     int16_t alien_timer;
     uint8_t ufo_present;        /* a UFO or the flying saucer is on screen (for its warble) */
     GameStar stars[GAME_STAR_COUNT];
+    GameSpark sparks[GAME_MAX_SPARKS];
+    GameBlast blasts[GAME_MAX_BLASTS];
+    uint32_t fx_seed;           /* explosion randomness: kept apart from rng_state so the game itself is unaffected */
     int16_t star_points[GAME_STAR_COUNT * 2];   /* screen x,y of every star, grouped by layer */
     uint16_t shield_timer;      /* frames left of each active power-up */
     uint16_t rapid_timer;

@@ -20,7 +20,7 @@ case "$TARGET" in
     *.st|*.ST)
         exec hatari \
             --machine st \
-            --memsize 1 \
+            --memsize 512 \
             --sound off \
             --tos "$TOS_IMAGE" \
             --disk-a "$TARGET"
@@ -30,7 +30,7 @@ case "$TARGET" in
         TARGET_NAME=$(basename -- "$TARGET")
         exec hatari \
             --machine st \
-            --memsize 1 \
+            --memsize 512 \
             --sound off \
             --tos "$TOS_IMAGE" \
             --harddrive "$TARGET_DIR" \

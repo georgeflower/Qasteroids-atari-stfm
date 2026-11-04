@@ -1442,21 +1442,20 @@ static void test_static_screens_draw_once_per_buffer(void) {
 
     render(&state);
     CHECK(clear_calls == 1);
-    CHECK(has_text("ASTEROIDS"));
-    CHECK(find_text("ASTEROIDS")->scale == 2);
+    CHECK(has_text("A"));   /* the logo is animated letter by letter */
+    CHECK(find_text("A")->scale == 2);
     CHECK(has_text("PRESS FIRE TO START"));
     CHECK(has_text("- HALL OF FAME -"));
     CHECK(has_text("1. ---  000000"));
     render(&state);
     CHECK(clear_calls == 1);
-    CHECK(has_text("ASTEROIDS"));
 
-    /* both buffers are done: nothing more is drawn until something changes */
+    /* both buffers are done: only the animated logo is redrawn */
     render(&state);
     CHECK(clear_calls == 0);
-    CHECK(!has_text("ASTEROIDS"));
+    CHECK(has_text("A"));
     CHECK(!has_text("PRESS FIRE TO START"));
-    CHECK(line_count == 0);
+    CHECK(!has_text("HALL OF FAME"));
 }
 
 static void test_title_prompt_blinks(void) {

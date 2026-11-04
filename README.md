@@ -179,6 +179,13 @@ Setup: `sudo apt install gcc-m68k-linux-gnu binutils-m68k-linux-gnu python3-pyel
 put an EmuTOS image at `roms/etos512se.img` (e.g. from the Quanoid-atari-ST repo), then `make -f Makefile.ubuntu`
 (output `build/ubuntu/ASTROIDS.PRG`). `hatari/shot.sh build/ubuntu/ASTROIDS.PRG out.png 25 8` takes a headless screenshot.
 
-Demo-scene effects: a Timer-B raster splitter (`src/st_raster.S`) changes palette entries every 2 scanlines for the sky
-gradient and frame ribbon; rocks are pre-rendered shaded, dithered 4-plane sprites compiled to 68000 code at startup;
-the ship (`tools/gen_ship.py` -> `include/ship_data.h`) and glowing bullets are masked planar sprites shifted at run time.
+Target: a stock 520 STFM (512 KB, `hatari --machine st --memsize 512`; `hatari/run-hatari.sh` uses this). `make -f Makefile.ubuntu disk-image`
+writes `build/ubuntu/asteroids-stfm.st`. `shot.sh` env: `HATARI_MEM`, `HATARI_MACHINE`, `TITLE=1` (shoot the title), `PRESS`, `HOLD`.
+
+Demo-scene effects: rocks are pre-rendered shaded, dithered 4-plane sprites compiled to 68000 code at startup (128 KB pool,
+clipped by jumping into the code at the first visible row); the ship (`tools/gen_ship.py` -> `include/ship_data.h`) and glowing
+bullets are masked planar sprites shifted at run time (`src/st_sprite.S`). Explosions are spark streaks that fade white -> yellow ->
+orange -> red plus an expanding shock ring; the title logo is a per-letter sine wave with cycling colours and orbiting sparkles.
+The sky raster gradient was dropped in favour of a flat black field.
+
+Performance: press F2 in game for "WORK ms / FPS". Measured in Hatari: 50 fps (about 15 ms of work per frame) with 7 large rocks.

@@ -67,10 +67,6 @@ extern void st_clear_rects(unsigned char *buffer, const short *rects, long count
 extern void st_clear_rect(unsigned char *buffer, long group0, long group1, long y0, long y1);
 static void pace_poll_key(void);
 extern void st_ikbd_install(void);
-extern void st_raster_install(void);
-extern void st_raster_remove(void);
-extern volatile short st_raster_enabled;
-extern unsigned short st_raster_table[];
 extern void st_ikbd_remove(void);
 
 /* Written by the IKBD interrupt handler in st_ikbd.S: 1 while the key is held; the make codes in the order
@@ -139,42 +135,6 @@ static void set_palette(void) {
     }
 }
 
-
-/* ---- raster palette (see st_raster.S) ----
- * Colour 0 (field and HUD background) and colour 5 (the frame) are re-programmed every two display lines.
- * The field is a deep-space gradient with a faint glow along the bottom, the frame a ribbon of metallic blue
- * bars that slowly scroll downwards. */
-#define RASTER_STEP 2
-#define RASTER_ROWS 100
-
-static void raster_build(uint32_t tick) {
-    static const uint16_t sky[16] = {
-        0x001, 0x001, 0x002, 0x002, 0x102, 0x103, 0x103, 0x203,
-        0x213, 0x214, 0x214, 0x224, 0x225, 0x225, 0x235, 0x235
-    };
-    static const uint16_t ribbon[16] = {
-        0x113, 0x124, 0x235, 0x346, 0x457, 0x567, 0x457, 0x346,
-        0x235, 0x124, 0x113, 0x012, 0x113, 0x124, 0x124, 0x113
-    };
-    int row;
-
-    for (row = 0; row < RASTER_ROWS; ++row) {
-        const int y = row * RASTER_STEP;
-        uint16_t c0 = 0x000;
-
-        if (y >= FIELD_Y0 && y <= FIELD_Y1) {
-            c0 = sky[((y - FIELD_Y0) * 16) / (FIELD_Y1 - FIELD_Y0 + 1)];
-        }
-        st_raster_table[row * 2] = c0;
-        st_raster_table[row * 2 + 1] = ribbon[(row + (int) (tick >> 1)) & 15];
-    }
-}
-
-static void raster_start(void) {
-    raster_build(0);
-    st_raster_enabled = 1;
-    st_raster_install();
-}
 
 static void show_screen(const unsigned char *buffer) {
     const unsigned long address = (unsigned long) buffer;
@@ -260,7 +220,6 @@ int platform_init(void) {
     enter_video();
     (void) Ikbdws(1, ikbd_game_mode);
     st_ikbd_install();
-    raster_start();
     return 1;
 }
 
@@ -282,7 +241,6 @@ void platform_shutdown(void) {
     wait_vbl();
     wait_vbl();
     wait_vbl();
-    st_raster_remove();
     st_ikbd_remove();
     (void) Ikbdws(0, ikbd_mouse_on);
     Setscreen(original_logbase, original_physbase, original_resolution);
@@ -374,13 +332,13 @@ void platform_clear_field(void *context) {
 #define SPRITE_CENTER_ROW 24
 #define SPRITE_CENTER_X 32
 #define SPRITE_GROUPS 5
-#define SPRITE_POOL_WORDS (0x28000UL << GAME_ROCK_ORIENT_BITS)
+#define SPRITE_POOL_WORDS (0x10000UL << GAME_ROCK_ORIENT_BITS)
 
 static uint16_t *rock_sprites[SPRITE_COUNT];
 static int rock_sprites_ready;
 static unsigned long rock_sprite_words;
 static uint16_t rock_code_pool[SPRITE_POOL_WORDS];
-static uint16_t sprite_scratch[SPRITE_ROWS * 80];   /* a screen-shaped strip: 160 bytes a row */
+static uint16_t rock_row_offset[SPRITE_COUNT][SPRITE_ROWS + 1];   /* word offset of each row's code; [rows] is the rts */
 static uint8_t rock_chunky[SPRITE_ROWS][SPRITE_GROUPS * 16];
 static uint16_t rock_planar[SPRITE_ROWS][SPRITE_GROUPS][5];   /* planes 0-3 and the coverage, unshifted */
 
@@ -594,7 +552,7 @@ static uint16_t *emit_long(uint16_t *out, uint16_t opcode, uint32_t value, int d
 }
 
 /* Generate the routine for one x offset (phase) of the planar image; NULL when the pool is full. */
-static uint16_t *rock_emit(uint16_t *out, uint16_t *limit, const GameAsteroid *rock, int phase) {
+static uint16_t *rock_emit(uint16_t *out, uint16_t *limit, const GameAsteroid *rock, int phase, uint16_t *row_offset) {
     uint16_t *const start = out;
     int row;
     int group;
@@ -603,6 +561,7 @@ static uint16_t *rock_emit(uint16_t *out, uint16_t *limit, const GameAsteroid *r
         return NULL;
     }
     for (row = SPRITE_CENTER_ROW + rock->bound_y0; row <= SPRITE_CENTER_ROW + rock->bound_y1; ++row) {
+        row_offset[row - SPRITE_CENTER_ROW - rock->bound_y0] = (uint16_t) (out - start);
         for (group = 0; group < SPRITE_GROUPS; ++group) {
             uint16_t word[5];
             int plane;
@@ -618,7 +577,6 @@ static uint16_t *rock_emit(uint16_t *out, uint16_t *limit, const GameAsteroid *r
             }
             if (word[4] != 0) {
                 const int displacement = (row - SPRITE_CENTER_ROW) * 160 + (group - SPRITE_CENTER_X / 16) * 8;
-                const uint32_t keep = (uint32_t) (uint16_t) ~word[4] * 0x10001u;
                 const uint32_t low = ((uint32_t) word[0] << 16) | word[1];
                 const uint32_t high = ((uint32_t) word[2] << 16) | word[3];
 
@@ -626,8 +584,8 @@ static uint16_t *rock_emit(uint16_t *out, uint16_t *limit, const GameAsteroid *r
                     out = emit_long(out, 0x217c, low, displacement);
                     out = emit_long(out, 0x217c, high, displacement + 4);
                 } else {
-                    out = emit_long(out, 0x02a8, keep, displacement);
-                    out = emit_long(out, 0x02a8, keep, displacement + 4);
+                    /* edge words are only OR-ed in: the area was cleared at the start of the frame, so the keep mask
+                       is needed only where rocks overlap, and there it costs a rim pixel at worst */
                     if (low != 0) {
                         out = emit_long(out, 0x00a8, low, displacement);
                     }
@@ -638,8 +596,8 @@ static uint16_t *rock_emit(uint16_t *out, uint16_t *limit, const GameAsteroid *r
             }
         }
     }
+    row_offset[rock->bound_y1 - rock->bound_y0 + 1] = (uint16_t) (out - start);
     *out++ = 0x4e75;   /* rts */
-    (void) start;
     return out;
 }
 
@@ -665,7 +623,7 @@ void platform_build_rock_sprites(const GameState *state) {
                 rock_to_planar();
                 for (phase = 0; phase < 16; ++phase) {
                     const int index = ((((size - 1) * GAME_ROCK_SHAPES + shape) * SPRITE_ORIENTS + orient) << 4) + phase;
-                    uint16_t *const code = rock_emit(out, limit, &rock, phase);
+                    uint16_t *const code = rock_emit(out, limit, &rock, phase, rock_row_offset[index]);
 
                     if (code != NULL) {
                         rock_sprites[index] = out;
@@ -691,64 +649,57 @@ void platform_draw_rocks(void *context, GameState *state) {
                   rock_sprites_ready ? rock_sprites : NULL);
 }
 
-/* A rock that pokes out of the field (called from st_rocks.S): the sprite is drawn into a scratch copy of the
-   part of the screen it covers, and only the part inside the field is copied back. */
+/* A rock that pokes out of the field (called from st_rocks.S). The generated code is entered at the first row inside
+   the field and stopped after the last one (an rts is patched in for the call); whatever it wrote into the frame
+   columns on the left and right - including the spill into the neighbouring row - is painted over with the frame
+   colour again. */
 void platform_draw_rock_clipped(GameAsteroid *rock, long cx, long cy) {
     const int orient = (int) ((rock->angle >> 10) & (unsigned) (GAME_ROCK_ORIENT_MASK)) >> (6 - GAME_ROCK_ORIENT_BITS);
     const int index = ((((rock->size - 1) * GAME_ROCK_SHAPES + (rock->shape - 1)) * SPRITE_ORIENTS +
                         (GAME_ROCK_ORIENT_BITS ? orient : 0)) << 4) + (int) (cx & 15);
     uint16_t *const code = rock_sprites[index];
-    const long centre_group = cx >> 4;
-    long y0 = cy + rock->bound_y0;
-    long y1 = cy + rock->bound_y1;
-    long g0 = (cx + rock->bound_x0) >> 4;
-    long g1 = (cx + rock->bound_x1) >> 4;
-    long y;
-    long g;
-    unsigned char *const scratch = (unsigned char *) sprite_scratch + SPRITE_CENTER_ROW * 160 + 2 * 8;
+    const uint16_t *const offset = rock_row_offset[index];
+    const long rows = rock->bound_y1 - rock->bound_y0 + 1;
+    const long top = cy + rock->bound_y0;
+    const long g0 = (cx + rock->bound_x0) >> 4;
+    const long g1 = (cx + rock->bound_x1) >> 4;
+    long first = 0;
+    long last = rows - 1;
 
     if (code == NULL) {
         return;
     }
-    if (y0 < FIELD_Y0) {
-        y0 = FIELD_Y0;
+    if (top < FIELD_Y0) {
+        first = FIELD_Y0 - top;
     }
-    if (y1 > FIELD_Y1) {
-        y1 = FIELD_Y1;
+    if (top + last > FIELD_Y1) {
+        last = FIELD_Y1 - top;
     }
-    if (g0 < FIELD_GROUP0) {
-        g0 = FIELD_GROUP0;
-    }
-    if (g1 > FIELD_GROUP1) {
-        g1 = FIELD_GROUP1;
-    }
-    if (y0 > y1 || g0 > g1) {
+    if (first > last || g1 < FIELD_GROUP0 || g0 > FIELD_GROUP1) {
         return;
     }
-    for (y = y0; y <= y1; ++y) {
-        for (g = g0; g <= g1; ++g) {
-            const uint32_t *from = (const uint32_t *) (draw_buffer + y * 160 + g * 8);
-            uint32_t *to = (uint32_t *) (scratch + (y - cy) * 160 + (g - centre_group) * 8);
-
-            to[0] = from[0];
-            to[1] = from[1];
-        }
-    }
     {
-        void (*const draw)(void) = (void (*)(void)) code;
+        uint16_t *const stop = code + offset[last + 1];
+        const uint16_t saved = *stop;
+        void (*const draw)(void) = (void (*)(void)) (code + offset[first]);
 
+        *stop = 0x4e75;
         __asm__ volatile("move.l %0,%%a0\n\tjsr (%1)"
                          :
-                         : "r"(scratch), "a"(draw)
+                         : "r"(draw_buffer + cy * 160 + (cx >> 4) * 8), "a"(draw)
                          : "a0", "a1", "d0", "d1", "d2", "d3", "memory", "cc");
+        *stop = saved;
     }
-    for (y = y0; y <= y1; ++y) {
-        for (g = g0; g <= g1; ++g) {
-            uint32_t *to = (uint32_t *) (draw_buffer + y * 160 + g * 8);
-            const uint32_t *from = (const uint32_t *) (scratch + (y - cy) * 160 + (g - centre_group) * 8);
+    if (g0 < FIELD_GROUP0 || g1 > FIELD_GROUP1) {
+        long y = top + first - 1;
+        const long y_end = top + last + 1;
+        unsigned char *row = draw_buffer + y * 160;
 
-            to[0] = from[0];
-            to[1] = from[1];
+        for (; y <= y_end; ++y, row += 160) {
+            uint32_t *const left = (uint32_t *) row;
+            uint32_t *const right = (uint32_t *) (row + 19 * 8);
+
+            left[0] = left[1] = right[0] = right[1] = 0xffff0000u;   /* GAME_COLOR_FRAME is 5: planes 0 and 2 */
         }
     }
 }
@@ -785,23 +736,32 @@ static void bullet_build(void) {
     bullet_ready = 1;
 }
 
+extern void st_blit_masked(const uint16_t *src, unsigned char *dst, long shift, long rows);
+
 /* Draw `rows` rows of a masked sprite whose top-left pixel is (sx, sy), clipped to the field. */
 static void blit_masked(const uint16_t (*src)[5], int rows, int sx, int sy) {
     const int shift = sx & 15;
     const int group = sx >> 4;
-    int row;
+    int row = 0;
 
-    for (row = 0; row < rows; ++row) {
-        const int y = sy + row;
-        unsigned char *line;
+    if (sy < FIELD_Y0) {
+        row = FIELD_Y0 - sy;
+    }
+    if (sy + rows - 1 > FIELD_Y1) {
+        rows = FIELD_Y1 - sy + 1;
+    }
+    if (row >= rows) {
+        return;
+    }
+    if (group >= FIELD_GROUP0 && group + 1 <= FIELD_GROUP1) {
+        st_blit_masked(src[row], draw_buffer + (sy + row) * 160 + group * 8, shift, rows - row);
+        return;
+    }
+    for (; row < rows; ++row) {     /* touching the left or right edge of the field: one group at a time */
+        unsigned char *const line = draw_buffer + (sy + row) * 160;
+        const uint32_t cover = ((uint32_t) src[row][4] << 16) >> shift;
         int plane;
-        uint32_t cover;
 
-        if (y < FIELD_Y0 || y > FIELD_Y1) {
-            continue;
-        }
-        line = draw_buffer + y * 160;
-        cover = ((uint32_t) src[row][4] << 16) >> shift;
         for (plane = 0; plane < 4; ++plane) {
             const uint32_t bits = ((uint32_t) src[row][plane] << 16) >> shift;
 
@@ -1145,6 +1105,18 @@ static int pace_easy_frames;
 static uint32_t pace_average_ms = 10;
 static int pace_message_frames;
 static int pace_f1_was_down;
+static int pace_f2_was_down;
+static int pace_stats_on;
+static int pace_stats_clear;
+
+static void put_number(char *out, unsigned long value, int width) {
+    int i;
+
+    for (i = width - 1; i >= 0; --i) {
+        out[i] = (char) ((value || i == width - 1) ? '0' + (int) (value % 10u) : ' ');
+        value /= 10u;
+    }
+}
 
 int platform_pace_cadence(void) {
     return pace_cadence;
@@ -1196,9 +1168,27 @@ static void pace_poll_key(void) {
         pace_message_frames = PACE_MESSAGE_FRAMES;
     }
     pace_f1_was_down = down;
+    if (st_key_state[0x3cu] && !pace_f2_was_down) {   /* F2: work time and frame rate */
+        pace_stats_on = !pace_stats_on;
+        pace_stats_clear = 2;
+    }
+    pace_f2_was_down = st_key_state[0x3cu] != 0;
 }
 
 static void pace_draw_message(void) {
+    if (pace_stats_on) {
+        char line[] = "WORK 000 MS  FPS 00  ";
+
+        put_number(line + 5, pace_average_ms, 3);
+        put_number(line + 17, (unsigned long) (50 / pace_cadence), 2);
+        st_text_draw(draw_buffer, 8, 192, line, 2, GAME_COLOR_FRAME, 1);
+        return;
+    }
+    if (pace_stats_clear > 0) {
+        --pace_stats_clear;
+        st_text_draw(draw_buffer, 8, 192, "                     ", GAME_COLOR_FRAME, GAME_COLOR_FRAME, 1);
+        return;
+    }
     if (pace_message_frames > 0) {
         st_text_draw(draw_buffer, 8, 192, pace_locked ? "F1 PACING: STEADY   " : "F1 PACING: FREE     ", 2,
                      GAME_COLOR_FRAME, 1);
@@ -1230,7 +1220,6 @@ void platform_end_frame(void) {
         }
     }
     pace_last_flip = ST_FRCLOCK;
-    raster_build(ST_FRCLOCK);
     draw_buffer = show_buffer;
     show_buffer = finished;
     pace_work_start = ST_HZ200;

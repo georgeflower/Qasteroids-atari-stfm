@@ -404,6 +404,137 @@ static void spawn_wave(GameState *state) {
     emit(state, SFX_WAVE_START);
 }
 
+static void mark_rect(const GameRenderer *renderer, int x0, int y0, int x1, int y1);
+static void draw_outline(const GameRenderer *renderer, const int16_t *points, int count, uint8_t color);
+
+/* ---- explosion effects: sparks and shock rings, kept in screen space and drawn over the rocks ---- */
+
+enum { FX_FIRE, FX_SHIP, FX_ALIEN };
+
+static uint32_t fx_rand(GameState *state) {
+    state->fx_seed = state->fx_seed * 1103515245u + 12345u;
+    return state->fx_seed >> 16;
+}
+
+static void fx_explode(GameState *state, int32_t world_x, int32_t world_y, int count, int speed, int kind, int ring) {
+    const int32_t sx = (int32_t) screen_x(state, world_x) << GAME_FIX_SHIFT;
+    const int32_t sy = (int32_t) screen_y(state, world_y) << GAME_FIX_SHIFT;
+    int index;
+
+    if (state->fx_seed == 0) {
+        state->fx_seed = 0x1234567u;
+    }
+    for (index = 0; index < GAME_MAX_SPARKS && count > 0; ++index) {
+        GameSpark *spark = &state->sparks[index];
+        uint16_t angle;
+        int16_t mag;
+
+        if (spark->life != 0) {
+            continue;
+        }
+        angle = (uint16_t) fx_rand(state);
+        mag = (int16_t) (speed / 2 + (int) (fx_rand(state) % (unsigned) speed));
+        spark->x = sx;
+        spark->y = sy;
+        spark->vx = mul16(mag, (int16_t) trig_cos(angle)) >> 2;
+        spark->vy = mul16(mag, (int16_t) trig_sin(angle)) >> 2;
+        spark->life_max = (uint8_t) (14 + fx_rand(state) % 14);
+        spark->life = spark->life_max;
+        spark->kind = (uint8_t) kind;
+        --count;
+    }
+    if (ring > 0) {
+        for (index = 0; index < GAME_MAX_BLASTS; ++index) {
+            if (state->blasts[index].age == 0) {
+                state->blasts[index].x = sx;
+                state->blasts[index].y = sy;
+                state->blasts[index].age = 1;
+                state->blasts[index].size = (uint8_t) ring;
+                state->blasts[index].kind = (uint8_t) kind;
+                break;
+            }
+        }
+    }
+}
+
+static void fx_update(GameState *state) {
+    int index;
+
+    for (index = 0; index < GAME_MAX_SPARKS; ++index) {
+        GameSpark *spark = &state->sparks[index];
+
+        if (spark->life == 0) {
+            continue;
+        }
+        spark->x += spark->vx;
+        spark->y += spark->vy;
+        spark->vx -= spark->vx >> 5;
+        spark->vy -= spark->vy >> 5;
+        --spark->life;
+    }
+    for (index = 0; index < GAME_MAX_BLASTS; ++index) {
+        GameBlast *blast = &state->blasts[index];
+
+        if (blast->age != 0 && ++blast->age > 12) {
+            blast->age = 0;
+        }
+    }
+}
+
+static uint8_t fx_colour(const GameSpark *spark) {
+    const int stage = (spark->life * 4) / spark->life_max;   /* 3 = young */
+
+    if (spark->kind == FX_SHIP) {
+        return stage >= 3 ? 2 : stage == 2 ? 12 : stage == 1 ? 11 : 8;
+    }
+    if (spark->kind == FX_ALIEN) {
+        return stage >= 3 ? 2 : stage == 2 ? 1 : stage == 1 ? 12 : 8;
+    }
+    return stage >= 3 ? 2 : stage == 2 ? 6 : stage == 1 ? 3 : 7;
+}
+
+static void fx_draw(const GameState *state, const GameRenderer *renderer) {
+    static const int16_t ring_cos[8] = {16, 11, 0, -11, -16, -11, 0, 11};
+    static const int16_t ring_sin[8] = {0, 11, 16, 11, 0, -11, -16, -11};
+    int index;
+
+    for (index = 0; index < GAME_MAX_SPARKS; ++index) {
+        const GameSpark *spark = &state->sparks[index];
+        const int x = (int) (spark->x >> GAME_FIX_SHIFT);
+        const int y = (int) (spark->y >> GAME_FIX_SHIFT);
+        const int tx = x - (int) (spark->vx >> 14);
+        const int ty = y - (int) (spark->vy >> 14);
+
+        if (spark->life == 0 || x < state->field_x + 2 || y < state->field_y + 2 ||
+            x >= state->field_x + state->field_width - 2 || y >= state->field_y + state->field_height - 2) {
+            continue;
+        }
+        renderer->line(renderer->context, tx, ty, x, y, fx_colour(spark));
+        mark_rect(renderer, tx < x ? tx : x, ty < y ? ty : y, tx < x ? x : tx, ty < y ? y : ty);
+    }
+    for (index = 0; index < GAME_MAX_BLASTS; ++index) {
+        const GameBlast *blast = &state->blasts[index];
+        int16_t points[16];
+        int radius;
+        int corner;
+
+        if (blast->age == 0) {
+            continue;
+        }
+        radius = (blast->age * blast->size) >> 2;
+        for (corner = 0; corner < 8; ++corner) {
+            const int px = (int) (blast->x >> GAME_FIX_SHIFT) + ((radius * ring_cos[corner]) >> 4);
+            const int py = (int) (blast->y >> GAME_FIX_SHIFT) + ((radius * ring_sin[corner]) >> 4);
+
+            points[corner * 2] = (int16_t) px;
+            points[corner * 2 + 1] = (int16_t) py;
+        }
+        draw_outline(renderer, points, 8, blast->age < 5 ? 2 : blast->age < 9 ? (blast->kind == FX_FIRE ? 6 : 12) : 7);
+        mark_rect(renderer, (int) (blast->x >> GAME_FIX_SHIFT) - radius, (int) (blast->y >> GAME_FIX_SHIFT) - radius,
+                  (int) (blast->x >> GAME_FIX_SHIFT) + radius, (int) (blast->y >> GAME_FIX_SHIFT) + radius);
+    }
+}
+
 static void split_asteroid(GameState *state, const GameAsteroid *asteroid) {
     if (asteroid->size <= GAME_ASTEROID_SMALL) {
         return;
@@ -1161,6 +1292,7 @@ void game_spawn_enemy_now(GameState *state, int kind) {
 static void kill_enemy(GameState *state, GameEnemy *enemy) {
     add_score(state, enemy_points_table[enemy->kind]);
     emit(state, SFX_EXPLODE_MEDIUM);
+    fx_explode(state, enemy->x, enemy->y, 12, 36, FX_ALIEN, 10);
     maybe_drop_powerup(state, enemy->x, enemy->y,
                        enemy->kind == ENEMY_UFO_LARGE ? DROP_UFO_LARGE : enemy->kind == ENEMY_UFO_SMALL ? DROP_UFO_SMALL : DROP_ALIEN);
     enemy->active = 0;
@@ -1719,6 +1851,7 @@ static void defeat_boss(GameState *state) {
 
     add_score(state, 2000u + 200u * (uint32_t) state->wave);
     emit(state, SFX_EXPLODE_LARGE);
+    fx_explode(state, boss->x, boss->y, 30, 60, FX_FIRE, 24);
     {
         int weight[GAME_POWERUP_TYPES];
 
@@ -1962,6 +2095,8 @@ static void resolve_bullet_collisions(GameState *state) {
         add_score(state, asteroid_points_table[exploded.size]);
         emit(state, exploded.size == GAME_ASTEROID_LARGE ? SFX_EXPLODE_LARGE :
                     exploded.size == GAME_ASTEROID_MEDIUM ? SFX_EXPLODE_MEDIUM : SFX_EXPLODE_SMALL);
+        fx_explode(state, exploded.x, exploded.y, exploded.size == GAME_ASTEROID_LARGE ? 14 : exploded.size == GAME_ASTEROID_MEDIUM ? 9 : 5,
+                   exploded.size == GAME_ASTEROID_LARGE ? 40 : 30, FX_FIRE, exploded.size == GAME_ASTEROID_SMALL ? 0 : exploded.size == GAME_ASTEROID_LARGE ? 14 : 9);
         split_asteroid(state, &exploded);
         maybe_drop_powerup(state, exploded.x, exploded.y,
                            exploded.size == GAME_ASTEROID_LARGE ? DROP_ASTEROID_LARGE :
@@ -2087,6 +2222,7 @@ static void lose_life(GameState *state) {
         --state->lives;
     }
     state->life_lost_this_wave = 1;
+    fx_explode(state, state->ship.x, state->ship.y, 28, 50, FX_SHIP, 18);
     reset_ship(state);
     find_quiet_spot(state, &spot_x, &spot_y);
     state->ship.x = (int32_t) spot_x << GAME_FIX_SHIFT;
@@ -2464,6 +2600,7 @@ void game_step(GameState *state, const GameInput *input) {
 
     state->previous = *input;
     ++state->frame;
+    fx_update(state);
 
     switch (state->mode) {
     case GAME_MODE_PLAYING:
@@ -3169,7 +3306,6 @@ static void draw_title_screen(const GameState *state, const GameRenderer *render
     char line[24];
     int index;
 
-    put_centered(state, renderer, 10, "ASTEROIDS", GAME_COLOR_SHIP, 2);
     put_centered(state, renderer, 34, "A RETRO VECTOR ARCADE GAME", GAME_COLOR_GREY, 1);
     put_centered(state, renderer, 54, "- HALL OF FAME -", GAME_COLOR_YELLOW, 1);
     for (index = 0; index < GAME_HIGH_SCORE_COUNT; ++index) {
@@ -3187,6 +3323,41 @@ static void draw_title_screen(const GameState *state, const GameRenderer *render
     put_centered(state, renderer, 148, "A/D OR ARROWS TURN  W OR UP THRUST", GAME_COLOR_GREY, 1);
     put_centered(state, renderer, 158, "SPACE FIRE  H HYPERSPACE  P PAUSE", GAME_COLOR_GREY, 1);
     put_centered(state, renderer, 168, "JOYSTICK PORT 1 OR 2   ESC QUIT", GAME_COLOR_GREY, 1);
+}
+
+/* The logo: each letter rides its own sine wave and cycles through the palette, with sparkles orbiting it.
+   Redrawn every frame inside a dirty band so the moving letters leave nothing behind. */
+static void draw_title_logo(const GameState *state, const GameRenderer *renderer) {
+    static const uint8_t ramp[7] = {GAME_COLOR_SHIP, GAME_COLOR_YELLOW, 3, GAME_COLOR_RED, 10, 12, GAME_COLOR_WHITE};
+    const char *word = "ASTEROIDS";
+    const int left = centered_x(state, word, 2);
+    const int top = state->field_y + 4;
+    const uint16_t phase = (uint16_t) (state->frame << 10);
+    int index;
+
+    mark_rect(renderer, left - 8, top, left + 9 * 16 + 8, top + 27);
+    for (index = 0; index < 9; ++index) {
+        char letter[2];
+        const int bob = (int) (trig_sin((uint16_t) (phase + index * 6000)) >> 12);   /* -4..4 */
+
+        letter[0] = word[index];
+        letter[1] = 0;
+        put_text(renderer, left + index * 16, top + 6 + bob, letter, ramp[(index + (int) (state->frame >> 2)) % 7],
+                 GAME_COLOR_BLACK, 2);
+    }
+    if (renderer->line != NULL) {
+        const int mid_x = left + 72;
+        const int mid_y = top + 14;
+
+        for (index = 0; index < 6; ++index) {
+            const uint16_t angle = (uint16_t) (phase * 2 + index * 10922);
+            const int x = mid_x + (int) (trig_cos(angle) * 78 >> 14);
+            const int y = mid_y + (int) (trig_sin((uint16_t) (angle * 3)) * 11 >> 14);
+
+            renderer->line(renderer->context, x - 2, y, x + 2, y, GAME_COLOR_WHITE);
+            renderer->line(renderer->context, x, y - 2, x, y + 2, index & 1 ? GAME_COLOR_YELLOW : 12);
+        }
+    }
 }
 
 static void draw_game_over_screen(const GameState *state, const GameRenderer *renderer) {
@@ -3399,6 +3570,7 @@ void game_render(GameState *state, const GameRenderer *renderer) {
         if (renderer->rocks != NULL) {
             renderer->rocks(renderer->context, state);
         }
+        fx_draw(state, renderer);
         for (index = 0; index < GAME_MAX_ASTEROIDS; ++index) {
             if (state->asteroids[index].active && (renderer->rocks == NULL || state->asteroids[index].render_pending)) {
                 draw_asteroid(state, &state->asteroids[index], renderer);
@@ -3456,6 +3628,9 @@ void game_render(GameState *state, const GameRenderer *renderer) {
     } else if (state->mode == GAME_MODE_TITLE && state->prompt_refresh > 0) {
         draw_prompt(state, renderer);
         --state->prompt_refresh;
+    }
+    if (state->mode == GAME_MODE_TITLE) {
+        draw_title_logo(state, renderer);
     }
 
     if (state->screen_refresh > 0) {
