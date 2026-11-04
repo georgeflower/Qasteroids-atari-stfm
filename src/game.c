@@ -498,19 +498,34 @@ static void fx_draw(const GameState *state, const GameRenderer *renderer) {
     static const int16_t ring_sin[8] = {0, 11, 16, 11, 0, -11, -16, -11};
     int index;
 
-    for (index = 0; index < GAME_MAX_SPARKS; ++index) {
-        const GameSpark *spark = &state->sparks[index];
-        const int x = (int) (spark->x >> GAME_FIX_SHIFT);
-        const int y = (int) (spark->y >> GAME_FIX_SHIFT);
-        const int tx = x - (int) (spark->vx >> 14);
-        const int ty = y - (int) (spark->vy >> 14);
+    /* One dirty rectangle per group of eight sparks keeps the dirty list short; a full-field clear costs far more. */
+    for (index = 0; index < GAME_MAX_SPARKS; index += 8) {
+        int left = 32767;
+        int top = 32767;
+        int right = -1;
+        int bottom = -1;
+        int member;
 
-        if (spark->life == 0 || x < state->field_x + 2 || y < state->field_y + 2 ||
-            x >= state->field_x + state->field_width - 2 || y >= state->field_y + state->field_height - 2) {
-            continue;
+        for (member = index; member < index + 8 && member < GAME_MAX_SPARKS; ++member) {
+            const GameSpark *spark = &state->sparks[member];
+            const int x = (int) (spark->x >> GAME_FIX_SHIFT);
+            const int y = (int) (spark->y >> GAME_FIX_SHIFT);
+            const int tx = x - (int) (spark->vx >> 14);
+            const int ty = y - (int) (spark->vy >> 14);
+
+            if (spark->life == 0 || x < state->field_x + 2 || y < state->field_y + 2 ||
+                x >= state->field_x + state->field_width - 2 || y >= state->field_y + state->field_height - 2) {
+                continue;
+            }
+            renderer->line(renderer->context, tx, ty, x, y, fx_colour(spark));
+            if ((tx < x ? tx : x) < left) left = tx < x ? tx : x;
+            if ((ty < y ? ty : y) < top) top = ty < y ? ty : y;
+            if ((tx < x ? x : tx) > right) right = tx < x ? x : tx;
+            if ((ty < y ? y : ty) > bottom) bottom = ty < y ? y : ty;
         }
-        renderer->line(renderer->context, tx, ty, x, y, fx_colour(spark));
-        mark_rect(renderer, tx < x ? tx : x, ty < y ? ty : y, tx < x ? x : tx, ty < y ? y : ty);
+        if (right >= 0) {
+            mark_rect(renderer, left, top, right, bottom);
+        }
     }
     for (index = 0; index < GAME_MAX_BLASTS; ++index) {
         const GameBlast *blast = &state->blasts[index];

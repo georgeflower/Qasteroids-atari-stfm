@@ -30,7 +30,7 @@
 
 #define SCORE_FILE "ASTROIDS.SCO"
 #define SETTINGS_FILE "ASTROIDS.CFG"
-#define MAX_DIRTY_RECTS 96
+#define MAX_DIRTY_RECTS 192
 #define POLYGON_MAX_POINTS 24
 
 extern void st_clear_buffer(unsigned char *buffer);
