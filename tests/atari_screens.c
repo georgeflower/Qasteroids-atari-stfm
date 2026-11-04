@@ -29,6 +29,7 @@ int main(void) {
     renderer.clear_field = platform_clear_field;
     renderer.points = platform_draw_points;
     renderer.polygon_offsets = platform_draw_polygon_offsets;
+    renderer.sprite = NULL;
     renderer.rocks = platform_draw_rocks;
     renderer.low_detail = 0;
 

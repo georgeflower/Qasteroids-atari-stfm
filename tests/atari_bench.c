@@ -69,6 +69,7 @@ static uint32_t run(GameState *state, int mode) {
     maths_only.line = null_line;
     maths_only.polygon = null_polygon;
     maths_only.polygon_offsets = null_offsets;
+    maths_only.sprite = NULL;
     maths_and_dirty = maths_only;
     maths_and_dirty.dirty = platform_mark_dirty;
     memset(&full, 0, sizeof(full));
@@ -79,6 +80,7 @@ static uint32_t run(GameState *state, int mode) {
     full.clear_field = platform_clear_field;
     full.points = platform_draw_points;
     full.polygon_offsets = platform_draw_polygon_offsets;
+    full.sprite = NULL;
 #ifndef BENCH_C_ROUTE
     full.rocks = platform_draw_rocks;
 #endif

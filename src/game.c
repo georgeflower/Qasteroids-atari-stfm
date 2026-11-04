@@ -2546,12 +2546,15 @@ static void draw_ship(const GameState *state, const GameRenderer *renderer) {
         return;
     }
 
-    for (index = 0; index < 4; ++index) {
-        ship_point(state, ship_shape[index][0], ship_shape[index][1], cosine, sine, center_x, center_y,
-                   &points[index * 2], &points[index * 2 + 1]);
-        grow_bounds(&min_x, &min_y, &max_x, &max_y, points[index * 2], points[index * 2 + 1]);
+    if (renderer->sprite == NULL ||
+        !renderer->sprite(renderer->context, GAME_SPRITE_SHIP, (ship->angle >> 11) & 31, center_x, center_y)) {
+        for (index = 0; index < 4; ++index) {
+            ship_point(state, ship_shape[index][0], ship_shape[index][1], cosine, sine, center_x, center_y,
+                       &points[index * 2], &points[index * 2 + 1]);
+            grow_bounds(&min_x, &min_y, &max_x, &max_y, points[index * 2], points[index * 2 + 1]);
+        }
+        draw_outline(renderer, points, 4, GAME_COLOR_SHIP);
     }
-    draw_outline(renderer, points, 4, GAME_COLOR_SHIP);
 
     if (ship->thrusting) {
         const int length = 9 + (state->frame & 3);
@@ -2564,6 +2567,12 @@ static void draw_ship(const GameState *state, const GameRenderer *renderer) {
         ship_point(state, -5, 2, cosine, sine, center_x, center_y, &right[0], &right[1]);
         renderer->line(renderer->context, left[0], left[1], tip[0], tip[1], GAME_COLOR_FLAME);
         renderer->line(renderer->context, right[0], right[1], tip[0], tip[1], GAME_COLOR_FLAME);
+        if (renderer->sprite != NULL) {
+            int16_t root[2];
+
+            ship_point(state, -5, 0, cosine, sine, center_x, center_y, &root[0], &root[1]);
+            renderer->line(renderer->context, root[0], root[1], tip[0], tip[1], GAME_COLOR_YELLOW);   /* hot core */
+        }
         grow_bounds(&min_x, &min_y, &max_x, &max_y, tip[0], tip[1]);
         grow_bounds(&min_x, &min_y, &max_x, &max_y, left[0], left[1]);
         grow_bounds(&min_x, &min_y, &max_x, &max_y, right[0], right[1]);
@@ -2599,6 +2608,10 @@ static void draw_bullets(const GameState *state, const GameRenderer *renderer) {
         }
         x = screen_x(state, bullet->x);
         y = screen_y(state, bullet->y);
+        if (renderer->sprite != NULL &&
+            renderer->sprite(renderer->context, GAME_SPRITE_BULLET, (state->frame >> 1) & 3, x, y)) {
+            continue;
+        }
         renderer->line(renderer->context, x, y, x + 1, y, GAME_COLOR_SHIP);
         mark_rect(renderer, x, y, x + 1, y);
     }

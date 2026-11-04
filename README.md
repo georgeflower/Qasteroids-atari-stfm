@@ -172,3 +172,13 @@ The script uses either:
 - The original upstream project could not be diffed directly from this sandbox, so gameplay preservation is based on a reasonable Asteroids-style adaptation instead of verified one-to-one behavior
 - The code targets the 320x200 ST low resolution mode; STFM hardware does not provide an 8-bit chunky framebuffer, so color usage stays within native ST planar limits (16 colours)
 - Validation in this environment covers the portable game logic plus native artifact creation; sustained play-testing still needs real STFM hardware or Hatari with a TOS ROM
+
+## Ubuntu toolchain and visual effects
+
+Setup: `sudo apt install gcc-m68k-linux-gnu binutils-m68k-linux-gnu python3-pyelftools mtools hatari xvfb xdotool imagemagick`,
+put an EmuTOS image at `roms/etos512se.img` (e.g. from the Quanoid-atari-ST repo), then `make -f Makefile.ubuntu`
+(output `build/ubuntu/ASTROIDS.PRG`). `hatari/shot.sh build/ubuntu/ASTROIDS.PRG out.png 25 8` takes a headless screenshot.
+
+Demo-scene effects: a Timer-B raster splitter (`src/st_raster.S`) changes palette entries every 2 scanlines for the sky
+gradient and frame ribbon; rocks are pre-rendered shaded, dithered 4-plane sprites compiled to 68000 code at startup;
+the ship (`tools/gen_ship.py` -> `include/ship_data.h`) and glowing bullets are masked planar sprites shifted at run time.

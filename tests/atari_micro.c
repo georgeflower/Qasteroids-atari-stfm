@@ -83,6 +83,7 @@ static void diagnose(void) {
     r.line = c_line;
     r.polygon = c_poly;
     r.polygon_offsets = c_offs;
+    r.sprite = NULL;
     r.dirty = c_dirty;
     r.text = c_text;
     r.points = c_points;

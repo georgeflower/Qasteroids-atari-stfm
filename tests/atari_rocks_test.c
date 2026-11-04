@@ -111,6 +111,7 @@ int main(void) {
     via_c.line = platform_draw_line;
     via_c.polygon = platform_draw_polygon;
     via_c.polygon_offsets = platform_draw_polygon_offsets;
+    via_c.sprite = NULL;
     via_c.dirty = platform_mark_dirty;
     via_c.text = platform_draw_text;
     via_c.clear_field = platform_clear_field;

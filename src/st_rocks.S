@@ -6,8 +6,9 @@
 |
 | A rock with a shared outline (shape != 0) that lies inside the field is drawn by calling its prepared
 | "sprite": a little generated routine per (size, shape, orientation, x offset within the 16-pixel group), a
-| sequence of ori.w #mask,offset(a0) for the words the outline touches, entered with a0 at the word of the
-| rock's centre (see platform_build_rock_sprites). sprites is that table of routines, or NULL.
+| sequence of and.l / ori.l / move.l with immediate data for the shaded, four-bitplane rock, entered with a0 at
+| the word of the rock's centre (see platform_build_rock_sprites). sprites is that table of routines, or NULL.
+| Rocks that poke out of the field are drawn by platform_draw_rock_clipped when sprites is set.
 |
 | For every active rock: screen position from the world position (as screen_x/screen_y in game.c); bring the
 | cached outline (game_prepare_rock) and the prepared edge list (platform_prepare_rock) up to date when the
@@ -135,13 +136,7 @@ edgesready:
 	move.l	%d0,%a1
 	move.w	%d3,%d0
 	mulu.w	#160,%d0
-	lea	0(%a6,%d0.l),%a0		| the row of the centre
-	moveq	#0,%d0
-	move.b	GA_SIZE(%a3),%d0
-	neg.w	%d0
-	addq.w	#4,%d0
-	add.w	%d0,%d0
-	adda.w	%d0,%a0				| its bitplane
+	lea	0(%a6,%d0.l),%a0		| the row of the centre (the sprite writes all four bitplanes itself)
 	move.w	%d2,%d0
 	lsr.w	#4,%d0
 	lsl.w	#3,%d0
@@ -170,6 +165,19 @@ linedraw:
 borderrock:
 	bsr	appendrect
 	beq	rockdone			| nothing of it in the field
+	tst.l	72(%sp)
+	beq.s	outlineborder
+	move.w	%d3,%d0				| shaded sprites: clipped through a scratch bitmap in C
+	ext.l	%d0
+	move.l	%d0,-(%sp)
+	move.w	%d2,%d0
+	ext.l	%d0
+	move.l	%d0,-(%sp)
+	move.l	%a3,-(%sp)
+	jsr	_platform_draw_rock_clipped
+	lea	12(%sp),%sp
+	bra	rockdone
+outlineborder:
 	| the corner points on the stack: centre + offsets
 	lea	-48(%sp),%sp
 	move.l	%sp,%a0

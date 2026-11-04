@@ -151,6 +151,7 @@ static GameRenderer make_renderer(void) {
     renderer.clear_field = capture_clear;
     renderer.points = capture_points;
     renderer.polygon_offsets = NULL;
+    renderer.sprite = NULL;
     renderer.rocks = NULL;
     renderer.low_detail = 0;
     return renderer;
@@ -3354,6 +3355,7 @@ static void test_rock_offset_route(void) {
         state.asteroids[0].cache_valid = 0;
         state.screen_refresh = 0;
         renderer.polygon_offsets = capture_offsets;
+        renderer.sprite = NULL;
         offset_calls = 0;
         offset_cache_hits = 0;
         reset_capture();

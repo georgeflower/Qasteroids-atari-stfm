@@ -15,7 +15,7 @@ DISK_IMAGE := $(BUILD_DIR)/asteroids-stfm.st
 TEST_TARGET := $(BUILD_DIR)/game_tests
 
 ATARI_SRCS := $(SRC_DIR)/main.c $(SRC_DIR)/game.c $(SRC_DIR)/platform_atari_st.c $(SRC_DIR)/st_text.c $(SRC_DIR)/sound.c
-ATARI_ASMS := $(SRC_DIR)/st_video.S $(SRC_DIR)/st_ikbd.S $(SRC_DIR)/st_rocks.S $(SRC_DIR)/st_step.S
+ATARI_ASMS := $(SRC_DIR)/st_video.S $(SRC_DIR)/st_ikbd.S $(SRC_DIR)/st_raster.S $(SRC_DIR)/st_rocks.S $(SRC_DIR)/st_step.S
 ASM_INC := $(BUILD_DIR)/asm_offsets.inc
 ATARI_OBJS := $(ATARI_SRCS:$(SRC_DIR)/%.c=$(BUILD_DIR)/%.o) $(ATARI_ASMS:$(SRC_DIR)/%.S=$(BUILD_DIR)/%.o)
 TEST_SRCS := $(TEST_DIR)/game_tests.c $(SRC_DIR)/game.c $(SRC_DIR)/sound.c

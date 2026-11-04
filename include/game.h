@@ -20,8 +20,8 @@
 /* Rocks share a small set of outlines per size (as in the arcade original), so a drawer can prepare each one
    ahead of time. The rock turns through 1 << GAME_ROCK_ORIENT_BITS steps of the 64 the game knows; 0 means it
    keeps one orientation. */
-#define GAME_ROCK_SHAPES 8
-#define GAME_ROCK_SHAPE_BITS 3
+#define GAME_ROCK_SHAPES 4
+#define GAME_ROCK_SHAPE_BITS 2
 #define GAME_ROCK_ORIENT_BITS 0
 #define GAME_ROCK_ORIENT_MASK (0x3f & ~((1 << (6 - GAME_ROCK_ORIENT_BITS)) - 1))
 #define GAME_DRAW_CACHE_WORDS (3 + 6 * GAME_MAX_ASTEROID_POINTS)   /* room the platform may use per rock */
@@ -348,6 +348,17 @@ typedef void (*GamePointDrawer)(void *context, const int16_t *points, int count,
 /* Optional: clear the whole playing field (for the static screens). */
 typedef void (*GameFieldClearer)(void *context);
 
+/* Optional: pre-drawn shaded sprites for the things that have them. kind is one of GAME_SPRITE_*, frame
+   depends on the kind, x/y is the screen position of the sprite's centre. The platform draws it, reports its own
+   dirty rectangle and returns nonzero; when it returns 0 (or the callback is absent) game_render draws the
+   vector version instead. */
+enum {
+    GAME_SPRITE_SHIP = 0,       /* frame: heading in 32 steps */
+    GAME_SPRITE_BULLET,         /* frame: animation phase 0..3 */
+    GAME_SPRITE_ENEMY_BULLET    /* frame: colour (GAME_COLOR_*) */
+};
+typedef int (*GameSpriteDrawer)(void *context, int kind, int frame, int x, int y);
+
 typedef struct GameRenderer {
     void *context;
     GameLineDrawer line;
@@ -358,6 +369,7 @@ typedef struct GameRenderer {
     GamePointDrawer points;
     GameOffsetPolygonDrawer polygon_offsets;
     GameRocksDrawer rocks;
+    GameSpriteDrawer sprite;
     uint8_t low_detail;   /* nonzero when the machine is struggling: leave out what can be left out (the stars) */
 } GameRenderer;
 

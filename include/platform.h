@@ -42,6 +42,8 @@ void platform_draw_points(void *context, const int16_t *points, int count, uint8
 void platform_clear_field(void *context);
 void platform_end_frame(void);
 void platform_mark_dirty(void *context, int x0, int y0, int x1, int y1);
+/* Shaded ship and glowing bullet sprites (GameSpriteDrawer); returns 1 when drawn. */
+int platform_draw_sprite(void *context, int kind, int frame, int x, int y);
 int platform_take_elapsed_frames(void);
 
 /* Pacing: the number of vertical blanks each frame is currently held for (1 = 50 fps, 2 = 25 fps ...), chosen from

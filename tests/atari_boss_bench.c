@@ -53,6 +53,7 @@ int main(void) {
     renderer.line = platform_draw_line;
     renderer.polygon = platform_draw_polygon;
     renderer.polygon_offsets = platform_draw_polygon_offsets;
+    renderer.sprite = NULL;
     renderer.rocks = platform_draw_rocks;
     renderer.dirty = platform_mark_dirty;
     renderer.text = platform_draw_text;

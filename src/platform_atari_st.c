@@ -67,6 +67,10 @@ extern void st_clear_rects(unsigned char *buffer, const short *rects, long count
 extern void st_clear_rect(unsigned char *buffer, long group0, long group1, long y0, long y1);
 static void pace_poll_key(void);
 extern void st_ikbd_install(void);
+extern void st_raster_install(void);
+extern void st_raster_remove(void);
+extern volatile short st_raster_enabled;
+extern unsigned short st_raster_table[];
 extern void st_ikbd_remove(void);
 
 /* Written by the IKBD interrupt handler in st_ikbd.S: 1 while the key is held; the make codes in the order
@@ -133,6 +137,43 @@ static void set_palette(void) {
     for (i = 0; i < ST_PALETTE_COLORS; ++i) {
         ST_HW_PALETTE[i] = palette[i];
     }
+}
+
+
+/* ---- raster palette (see st_raster.S) ----
+ * Colour 0 (field and HUD background) and colour 5 (the frame) are re-programmed every two display lines.
+ * The field is a deep-space gradient with a faint glow along the bottom, the frame a ribbon of metallic blue
+ * bars that slowly scroll downwards. */
+#define RASTER_STEP 2
+#define RASTER_ROWS 100
+
+static void raster_build(uint32_t tick) {
+    static const uint16_t sky[16] = {
+        0x001, 0x001, 0x002, 0x002, 0x102, 0x103, 0x103, 0x203,
+        0x213, 0x214, 0x214, 0x224, 0x225, 0x225, 0x235, 0x235
+    };
+    static const uint16_t ribbon[16] = {
+        0x113, 0x124, 0x235, 0x346, 0x457, 0x567, 0x457, 0x346,
+        0x235, 0x124, 0x113, 0x012, 0x113, 0x124, 0x124, 0x113
+    };
+    int row;
+
+    for (row = 0; row < RASTER_ROWS; ++row) {
+        const int y = row * RASTER_STEP;
+        uint16_t c0 = 0x000;
+
+        if (y >= FIELD_Y0 && y <= FIELD_Y1) {
+            c0 = sky[((y - FIELD_Y0) * 16) / (FIELD_Y1 - FIELD_Y0 + 1)];
+        }
+        st_raster_table[row * 2] = c0;
+        st_raster_table[row * 2 + 1] = ribbon[(row + (int) (tick >> 1)) & 15];
+    }
+}
+
+static void raster_start(void) {
+    raster_build(0);
+    st_raster_enabled = 1;
+    st_raster_install();
 }
 
 static void show_screen(const unsigned char *buffer) {
@@ -219,6 +260,7 @@ int platform_init(void) {
     enter_video();
     (void) Ikbdws(1, ikbd_game_mode);
     st_ikbd_install();
+    raster_start();
     return 1;
 }
 
@@ -240,6 +282,7 @@ void platform_shutdown(void) {
     wait_vbl();
     wait_vbl();
     wait_vbl();
+    st_raster_remove();
     st_ikbd_remove();
     (void) Ikbdws(0, ikbd_mouse_on);
     Setscreen(original_logbase, original_physbase, original_resolution);
@@ -318,22 +361,287 @@ void platform_clear_field(void *context) {
     st_clear_rect(draw_buffer, FIELD_GROUP0, FIELD_GROUP1, FIELD_Y0, FIELD_Y1);
 }
 
-/* ---- pre-drawn rocks ----
- * For every (size, shared shape, orientation, x offset within a 16-pixel group) the outline is drawn once into a
- * scratch bitmap, and a tiny routine is generated that ORs exactly the words the outline touches into the
- * screen: `ori.w #mask,offset(a0)` per word, then rts. Drawing a rock is then a jsr to one of these. */
+/* ---- pre-drawn, shaded rocks ----
+ * For every (size, shared shape, x offset within a 16-pixel group) a lit, cratered rock is painted once with a
+ * little software shader (a sphere-like normal from the outline, one light from the top left, ordered dithering
+ * between the four stone tones), and a routine is generated that puts exactly its four-bitplane pixels on the
+ * screen: `move.l #planes,offset(a0)` for words the rock covers completely, `andi.l #keep` + `ori.l #planes`
+ * for the edge words, then rts. Drawing a rock is then a jsr to one of these - no per-pixel work at run time,
+ * and the rock properly hides what is behind it. */
 #define SPRITE_ORIENTS (1 << GAME_ROCK_ORIENT_BITS)
 #define SPRITE_COUNT (3 * GAME_ROCK_SHAPES * SPRITE_ORIENTS * 16)
 #define SPRITE_ROWS 48
 #define SPRITE_CENTER_ROW 24
 #define SPRITE_CENTER_X 32
-#define SPRITE_POOL_WORDS (0x10000UL << GAME_ROCK_ORIENT_BITS)
+#define SPRITE_GROUPS 5
+#define SPRITE_POOL_WORDS (0x28000UL << GAME_ROCK_ORIENT_BITS)
 
 static uint16_t *rock_sprites[SPRITE_COUNT];
 static int rock_sprites_ready;
 static unsigned long rock_sprite_words;
 static uint16_t rock_code_pool[SPRITE_POOL_WORDS];
-static uint16_t sprite_scratch[SPRITE_ROWS * 80];
+static uint16_t sprite_scratch[SPRITE_ROWS * 80];   /* a screen-shaped strip: 160 bytes a row */
+static uint8_t rock_chunky[SPRITE_ROWS][SPRITE_GROUPS * 16];
+static uint16_t rock_planar[SPRITE_ROWS][SPRITE_GROUPS][5];   /* planes 0-3 and the coverage, unshifted */
+
+/* stone tones, dark to light: colours 11, 9, 15 and 2 of the palette */
+static const uint8_t rock_ramp[4] = {11, 9, 15, 2};
+
+static uint32_t rock_hash(uint32_t a, uint32_t b, uint32_t c) {
+    uint32_t h = a * 0x9e3779b1u ^ b * 0x85ebca6bu ^ c * 0xc2b2ae35u;
+
+    h ^= h >> 15;
+    h *= 0x2c1b3c6du;
+    h ^= h >> 13;
+    return h;
+}
+
+static int rock_isqrt(int value) {
+    int root = 0;
+    int bit = 1 << 14;
+
+    while (bit > value) {
+        bit >>= 2;
+    }
+    while (bit != 0) {
+        if (value >= root + bit) {
+            value -= root + bit;
+            root = (root >> 1) + bit;
+        } else {
+            root >>= 1;
+        }
+        bit >>= 2;
+    }
+    return root;
+}
+
+/* Scanline fill of the outline (offsets from the centre) into the chunky image: 1 inside, 0 outside. */
+static void rock_fill(const GameAsteroid *rock) {
+    int row;
+
+    memset(rock_chunky, 0, sizeof(rock_chunky));
+    for (row = rock->bound_y0; row <= rock->bound_y1; ++row) {
+        int hits[GAME_MAX_ASTEROID_POINTS + 2];
+        int count = 0;
+        int edge;
+
+        for (edge = 0; edge < rock->draw_count; ++edge) {
+            const int next = (edge + 1 == rock->draw_count) ? 0 : edge + 1;
+            int x0 = rock->off_x[edge];
+            int y0 = rock->off_y[edge];
+            int x1 = rock->off_x[next];
+            int y1 = rock->off_y[next];
+
+            if (y0 == y1) {
+                continue;
+            }
+            if (y0 > y1) {
+                const int tx = x0;
+                const int ty = y0;
+
+                x0 = x1;
+                y0 = y1;
+                x1 = tx;
+                y1 = ty;
+            }
+            if (row >= y0 && row < y1) {
+                hits[count++] = x0 + ((row - y0) * (x1 - x0) * 2 + (y1 - y0)) / ((y1 - y0) * 2);
+            }
+        }
+        for (edge = 1; edge < count; ++edge) {   /* a few values: insertion sort */
+            const int value = hits[edge];
+            int at = edge - 1;
+
+            while (at >= 0 && hits[at] > value) {
+                hits[at + 1] = hits[at];
+                --at;
+            }
+            hits[at + 1] = value;
+        }
+        for (edge = 0; edge + 1 < count; edge += 2) {
+            int x;
+
+            for (x = hits[edge]; x <= hits[edge + 1]; ++x) {
+                rock_chunky[SPRITE_CENTER_ROW + row][SPRITE_CENTER_X + x] = 1;
+            }
+        }
+    }
+}
+
+/* Paint the lit, cratered stone into the filled outline. */
+static void rock_shade(const GameAsteroid *rock, int size, int shape) {
+    static const uint8_t bayer[2][2] = {{0, 2}, {3, 1}};
+    const int mid_x2 = rock->bound_x0 + rock->bound_x1;
+    const int mid_y2 = rock->bound_y0 + rock->bound_y1;
+    const int span_x = rock->bound_x1 - rock->bound_x0 + 2;
+    const int span_y = rock->bound_y1 - rock->bound_y0 + 2;
+    int crater_x[5];
+    int crater_y[5];
+    int crater_r[5];
+    const int craters = (size == GAME_ASTEROID_LARGE) ? 5 : (size == GAME_ASTEROID_MEDIUM) ? 2 : 0;
+    uint8_t lit[SPRITE_ROWS][SPRITE_GROUPS * 16];
+    int row;
+    int column;
+    int index;
+
+    for (index = 0; index < craters; ++index) {
+        const uint32_t h = rock_hash((uint32_t) size, (uint32_t) shape, (uint32_t) index + 7u);
+
+        crater_x[index] = ((int) (h & 255u) - 128) * 3 / 8 * span_x / 256;
+        crater_y[index] = ((int) ((h >> 8) & 255u) - 128) * 3 / 8 * span_y / 256;
+        crater_r[index] = (size == GAME_ASTEROID_LARGE) ? 2 + (int) ((h >> 16) & 3u) : 2;
+    }
+
+    memcpy(lit, rock_chunky, sizeof(lit));
+    for (row = rock->bound_y0; row <= rock->bound_y1; ++row) {
+        for (column = rock->bound_x0; column <= rock->bound_x1; ++column) {
+            const int y = SPRITE_CENTER_ROW + row;
+            const int x = SPRITE_CENTER_X + column;
+            int nx;
+            int ny;
+            int d2;
+            int height;
+            int dot;
+            int lum;
+            int tone;
+            int level;
+
+            if (!lit[y][x]) {
+                continue;
+            }
+            nx = (column * 2 - mid_x2) * 256 / span_x;
+            ny = (row * 2 - mid_y2) * 256 / span_y;
+            d2 = nx * nx + ny * ny;
+            if (d2 > 65535) {
+                d2 = 65535;
+            }
+            height = rock_isqrt(65535 - d2);
+            dot = (nx * -115 + ny * -141 + height * 179) >> 8;
+            lum = 38 + (dot > 0 ? (dot * 185) >> 8 : 0);
+            lum += (int) (rock_hash((uint32_t) x, (uint32_t) y, (uint32_t) size * 9u + (uint32_t) shape) & 31u) - 14;
+
+            for (index = 0; index < craters; ++index) {
+                const int dx = column - crater_x[index];
+                const int dy = row - crater_y[index];
+                const int dist2 = dx * dx + dy * dy;
+                const int r = crater_r[index];
+
+                if (dist2 < r * r) {
+                    lum -= 26 - (dx + dy) * 5;       /* shadowed on the lit side, brighter on the far wall */
+                } else if (dist2 <= (r + 1) * (r + 1) && dx + dy <= 0) {
+                    lum += 22;                      /* sunlit rim */
+                }
+            }
+            if (!lit[y][x - 1] || !lit[y][x + 1] || !lit[y - 1][x] || !lit[y + 1][x]) {
+                lum += (dot > 40) ? 30 : -34;       /* bright rim where the light hits, dark where it does not */
+            }
+            if (lum < 0) {
+                lum = 0;
+            }
+            level = (lum * 12) >> 8;
+            if (level > 12) {
+                level = 12;
+            }
+            tone = level >> 2;
+            if ((level & 3) > bayer[y & 1][x & 1] && tone < 3) {
+                ++tone;
+            }
+            rock_chunky[y][x] = rock_ramp[tone];
+        }
+    }
+}
+
+/* The chunky image as planar words (plane 0-3 and coverage) for the rows and groups it uses. */
+static void rock_to_planar(void) {
+    int row;
+    int group;
+    int bit;
+
+    memset(rock_planar, 0, sizeof(rock_planar));
+    for (row = 0; row < SPRITE_ROWS; ++row) {
+        for (group = 0; group < SPRITE_GROUPS; ++group) {
+            for (bit = 0; bit < 16; ++bit) {
+                const uint8_t colour = rock_chunky[row][group * 16 + bit];
+                const uint16_t mask = (uint16_t) (0x8000u >> bit);
+
+                if (colour == 0) {
+                    continue;
+                }
+                rock_planar[row][group][4] |= mask;
+                if (colour & 1) {
+                    rock_planar[row][group][0] |= mask;
+                }
+                if (colour & 2) {
+                    rock_planar[row][group][1] |= mask;
+                }
+                if (colour & 4) {
+                    rock_planar[row][group][2] |= mask;
+                }
+                if (colour & 8) {
+                    rock_planar[row][group][3] |= mask;
+                }
+            }
+        }
+    }
+}
+
+static uint16_t *emit_long(uint16_t *out, uint16_t opcode, uint32_t value, int displacement) {
+    *out++ = opcode;
+    *out++ = (uint16_t) (value >> 16);
+    *out++ = (uint16_t) value;
+    *out++ = (uint16_t) displacement;
+    return out;
+}
+
+/* Generate the routine for one x offset (phase) of the planar image; NULL when the pool is full. */
+static uint16_t *rock_emit(uint16_t *out, uint16_t *limit, const GameAsteroid *rock, int phase) {
+    uint16_t *const start = out;
+    int row;
+    int group;
+
+    if ((unsigned long) (limit - out) < (unsigned long) (rock->bound_y1 - rock->bound_y0 + 1) * SPRITE_GROUPS * 16 + 1) {
+        return NULL;
+    }
+    for (row = SPRITE_CENTER_ROW + rock->bound_y0; row <= SPRITE_CENTER_ROW + rock->bound_y1; ++row) {
+        for (group = 0; group < SPRITE_GROUPS; ++group) {
+            uint16_t word[5];
+            int plane;
+
+            for (plane = 0; plane < 5; ++plane) {
+                const uint32_t pair = (group > 0 ? (uint32_t) rock_planar[row][group - 1][plane] << 16 : 0u) |
+                                      rock_planar[row][group][plane];
+
+                word[plane] = (uint16_t) (pair >> phase);
+            }
+            if (group > 0 && phase == 0) {
+                word[4] = rock_planar[row][group][4];
+            }
+            if (word[4] != 0) {
+                const int displacement = (row - SPRITE_CENTER_ROW) * 160 + (group - SPRITE_CENTER_X / 16) * 8;
+                const uint32_t keep = (uint32_t) (uint16_t) ~word[4] * 0x10001u;
+                const uint32_t low = ((uint32_t) word[0] << 16) | word[1];
+                const uint32_t high = ((uint32_t) word[2] << 16) | word[3];
+
+                if (word[4] == 0xffffu) {
+                    out = emit_long(out, 0x217c, low, displacement);
+                    out = emit_long(out, 0x217c, high, displacement + 4);
+                } else {
+                    out = emit_long(out, 0x02a8, keep, displacement);
+                    out = emit_long(out, 0x02a8, keep, displacement + 4);
+                    if (low != 0) {
+                        out = emit_long(out, 0x00a8, low, displacement);
+                    }
+                    if (high != 0) {
+                        out = emit_long(out, 0x00a8, high, displacement + 4);
+                    }
+                }
+            }
+        }
+    }
+    *out++ = 0x4e75;   /* rts */
+    (void) start;
+    return out;
+}
 
 void platform_build_rock_sprites(const GameState *state) {
     uint16_t *out = rock_code_pool;
@@ -352,36 +660,17 @@ void platform_build_rock_sprites(const GameState *state) {
                 game_rock_shape(size, shape, &rock);
                 rock.angle = (uint16_t) ((orient << (6 - GAME_ROCK_ORIENT_BITS)) << 10);
                 game_prepare_rock(state, &rock);
+                rock_fill(&rock);
+                rock_shade(&rock, size, shape);
+                rock_to_planar();
                 for (phase = 0; phase < 16; ++phase) {
                     const int index = ((((size - 1) * GAME_ROCK_SHAPES + shape) * SPRITE_ORIENTS + orient) << 4) + phase;
-                    short points[GAME_MAX_ASTEROID_POINTS * 2];
-                    int vertex;
-                    int row;
-                    int group;
+                    uint16_t *const code = rock_emit(out, limit, &rock, phase);
 
-                    for (vertex = 0; vertex < rock.draw_count; ++vertex) {
-                        points[vertex * 2] = (short) (SPRITE_CENTER_X + phase + rock.off_x[vertex]);
-                        points[vertex * 2 + 1] = (short) (SPRITE_CENTER_ROW + rock.off_y[vertex]);
-                    }
-                    st_clear_rect((unsigned char *) sprite_scratch, 0, 4, 0, SPRITE_ROWS - 1);
-                    st_draw_poly_plane((unsigned char *) sprite_scratch, points, rock.draw_count, 0);
-
-                    if ((unsigned long) (limit - out) < 3UL * SPRITE_ROWS * 5 + 1) {
-                        continue;   /* out of room: this one stays on the line drawer */
-                    }
-                    rock_sprites[index] = out;
-                    for (row = SPRITE_CENTER_ROW + rock.bound_y0; row <= SPRITE_CENTER_ROW + rock.bound_y1; ++row) {
-                        for (group = 0; group < 5; ++group) {
-                            const uint16_t word = sprite_scratch[row * 80 + group * 4];
-
-                            if (word != 0) {
-                                *out++ = 0x0068;   /* ori.w #imm,d16(a0) */
-                                *out++ = word;
-                                *out++ = (uint16_t) ((row - SPRITE_CENTER_ROW) * 160 + (group - SPRITE_CENTER_X / 16) * 8);
-                            }
-                        }
-                    }
-                    *out++ = 0x4e75;   /* rts */
+                    if (code != NULL) {
+                        rock_sprites[index] = out;
+                        out = code;
+                    }   /* otherwise this one stays on the line drawer */
                 }
             }
         }
@@ -400,6 +689,149 @@ void platform_draw_rocks(void *context, GameState *state) {
     (void) context;
     st_draw_rocks(state, draw_buffer, dirty_rects[page], &dirty_count[page], &dirty_full[page], MAX_DIRTY_RECTS,
                   rock_sprites_ready ? rock_sprites : NULL);
+}
+
+/* A rock that pokes out of the field (called from st_rocks.S): the sprite is drawn into a scratch copy of the
+   part of the screen it covers, and only the part inside the field is copied back. */
+void platform_draw_rock_clipped(GameAsteroid *rock, long cx, long cy) {
+    const int orient = (int) ((rock->angle >> 10) & (unsigned) (GAME_ROCK_ORIENT_MASK)) >> (6 - GAME_ROCK_ORIENT_BITS);
+    const int index = ((((rock->size - 1) * GAME_ROCK_SHAPES + (rock->shape - 1)) * SPRITE_ORIENTS +
+                        (GAME_ROCK_ORIENT_BITS ? orient : 0)) << 4) + (int) (cx & 15);
+    uint16_t *const code = rock_sprites[index];
+    const long centre_group = cx >> 4;
+    long y0 = cy + rock->bound_y0;
+    long y1 = cy + rock->bound_y1;
+    long g0 = (cx + rock->bound_x0) >> 4;
+    long g1 = (cx + rock->bound_x1) >> 4;
+    long y;
+    long g;
+    unsigned char *const scratch = (unsigned char *) sprite_scratch + SPRITE_CENTER_ROW * 160 + 2 * 8;
+
+    if (code == NULL) {
+        return;
+    }
+    if (y0 < FIELD_Y0) {
+        y0 = FIELD_Y0;
+    }
+    if (y1 > FIELD_Y1) {
+        y1 = FIELD_Y1;
+    }
+    if (g0 < FIELD_GROUP0) {
+        g0 = FIELD_GROUP0;
+    }
+    if (g1 > FIELD_GROUP1) {
+        g1 = FIELD_GROUP1;
+    }
+    if (y0 > y1 || g0 > g1) {
+        return;
+    }
+    for (y = y0; y <= y1; ++y) {
+        for (g = g0; g <= g1; ++g) {
+            const uint32_t *from = (const uint32_t *) (draw_buffer + y * 160 + g * 8);
+            uint32_t *to = (uint32_t *) (scratch + (y - cy) * 160 + (g - centre_group) * 8);
+
+            to[0] = from[0];
+            to[1] = from[1];
+        }
+    }
+    {
+        void (*const draw)(void) = (void (*)(void)) code;
+
+        __asm__ volatile("move.l %0,%%a0\n\tjsr (%1)"
+                         :
+                         : "r"(scratch), "a"(draw)
+                         : "a0", "a1", "d0", "d1", "d2", "d3", "memory", "cc");
+    }
+    for (y = y0; y <= y1; ++y) {
+        for (g = g0; g <= g1; ++g) {
+            uint32_t *to = (uint32_t *) (draw_buffer + y * 160 + g * 8);
+            const uint32_t *from = (const uint32_t *) (scratch + (y - cy) * 160 + (g - centre_group) * 8);
+
+            to[0] = from[0];
+            to[1] = from[1];
+        }
+    }
+}
+
+/* ---- masked sprites (ship, bullets): 16-wide, four planes plus a coverage word per row, shifted at run time ---- */
+
+#include "ship_data.h"
+
+static uint16_t bullet_planar[4][8][5];
+static int bullet_ready;
+
+static void bullet_build(void) {
+    static const char orb[8][9] = {"........", "..hhh...", ".hhwhh..", ".hwwwh..", ".hhwhh..", "..hhh...", "........", "........"};
+    static const unsigned char halo[4] = {1, 12, 1, 6};
+    int f, y, x, p;
+
+    for (f = 0; f < 4; ++f) {
+        for (y = 0; y < 8; ++y) {
+            for (x = 0; x < 8; ++x) {
+                const char c = orb[y][x];
+                const int colour = c == 'w' ? 2 : c == 'h' ? halo[f] : 0;
+
+                if (colour) {
+                    bullet_planar[f][y][4] |= (uint16_t) (0x8000u >> x);
+                    for (p = 0; p < 4; ++p) {
+                        if (colour >> p & 1) {
+                            bullet_planar[f][y][p] |= (uint16_t) (0x8000u >> x);
+                        }
+                    }
+                }
+            }
+        }
+    }
+    bullet_ready = 1;
+}
+
+/* Draw `rows` rows of a masked sprite whose top-left pixel is (sx, sy), clipped to the field. */
+static void blit_masked(const uint16_t (*src)[5], int rows, int sx, int sy) {
+    const int shift = sx & 15;
+    const int group = sx >> 4;
+    int row;
+
+    for (row = 0; row < rows; ++row) {
+        const int y = sy + row;
+        unsigned char *line;
+        int plane;
+        uint32_t cover;
+
+        if (y < FIELD_Y0 || y > FIELD_Y1) {
+            continue;
+        }
+        line = draw_buffer + y * 160;
+        cover = ((uint32_t) src[row][4] << 16) >> shift;
+        for (plane = 0; plane < 4; ++plane) {
+            const uint32_t bits = ((uint32_t) src[row][plane] << 16) >> shift;
+
+            if (group >= FIELD_GROUP0 && group <= FIELD_GROUP1) {
+                uint16_t *dst = (uint16_t *) (line + group * 8) + plane;
+                *dst = (uint16_t) ((*dst & ~(uint16_t) (cover >> 16)) | (uint16_t) (bits >> 16));
+            }
+            if (group + 1 >= FIELD_GROUP0 && group + 1 <= FIELD_GROUP1) {
+                uint16_t *dst = (uint16_t *) (line + (group + 1) * 8) + plane;
+                *dst = (uint16_t) ((*dst & ~(uint16_t) cover) | (uint16_t) bits);
+            }
+        }
+    }
+}
+
+int platform_draw_sprite(void *context, int kind, int frame, int x, int y) {
+    if (kind == GAME_SPRITE_SHIP) {
+        blit_masked(ship_planar[frame & 31], 16, x - 8, y - 8);
+        platform_mark_dirty(context, x - 9, y - 9, x + 9, y + 9);
+        return 1;
+    }
+    if (kind == GAME_SPRITE_BULLET) {
+        if (!bullet_ready) {
+            bullet_build();
+        }
+        blit_masked(bullet_planar[frame & 3], 8, x - 3, y - 3);
+        platform_mark_dirty(context, x - 4, y - 4, x + 4, y + 4);
+        return 1;
+    }
+    return 0;
 }
 
 int platform_dirty_count(void) {
@@ -798,6 +1230,7 @@ void platform_end_frame(void) {
         }
     }
     pace_last_flip = ST_FRCLOCK;
+    raster_build(ST_FRCLOCK);
     draw_buffer = show_buffer;
     show_buffer = finished;
     pace_work_start = ST_HZ200;
@@ -915,6 +1348,15 @@ void platform_mark_dirty(void *context, int x0, int y0, int x1, int y1) {
     (void) y0;
     (void) x1;
     (void) y1;
+}
+
+int platform_draw_sprite(void *context, int kind, int frame, int x, int y) {
+    (void) context;
+    (void) kind;
+    (void) frame;
+    (void) x;
+    (void) y;
+    return 0;
 }
 
 int platform_take_elapsed_frames(void) {
