@@ -21,65 +21,74 @@ static const unsigned char *glyph_for(char ch) {
     return font_data[code - 32];
 }
 
-/* Double every bit of an 8-bit row into 16 bits. */
-static unsigned short double_bits(unsigned char row) {
-    unsigned short wide = 0;
-    int bit;
+/* Every bit of an 8-bit row doubled to 16 bits: a table, filled on first use. */
+static unsigned short wide_table[256];
+static int wide_ready;
 
-    for (bit = 0; bit < 8; ++bit) {
-        if (row & (0x80 >> bit)) {
-            wide |= (unsigned short) (3u << (14 - 2 * bit));
+static void wide_init(void) {
+    int value;
+
+    for (value = 0; value < 256; ++value) {
+        unsigned short wide = 0;
+        int bit;
+
+        for (bit = 0; bit < 8; ++bit) {
+            if (value & (0x80 >> bit)) {
+                wide |= (unsigned short) (3u << (14 - 2 * bit));
+            }
         }
+        wide_table[value] = wide;
     }
-    return wide;
+    wide_ready = 1;
 }
 
+/* Plane p shows the glyph where fg has bit p, the background where bg has it: a pair of all-ones or all-zero masks. */
 static void draw_cell_1x(unsigned char *buffer, int x, int y, const unsigned char *glyph, int fg, int bg) {
     const int cell = x >> 3;
-    const int group_offset = (cell >> 1) * 8 + (cell & 1);
+    unsigned char *target = buffer + y * ROW_BYTES + (cell >> 1) * 8 + (cell & 1);
+    const unsigned char f0 = (fg & 1) ? 0xff : 0, f1 = (fg & 2) ? 0xff : 0, f2 = (fg & 4) ? 0xff : 0, f3 = (fg & 8) ? 0xff : 0;
+    const unsigned char b0 = (bg & 1) ? 0xff : 0, b1 = (bg & 2) ? 0xff : 0, b2 = (bg & 4) ? 0xff : 0, b3 = (bg & 8) ? 0xff : 0;
     int row;
 
     for (row = 0; row < 8; ++row) {
-        unsigned char *target = buffer + (y + row) * ROW_BYTES + group_offset;
         const unsigned char bits = glyph[row];
-        int plane;
+        const unsigned char rest = (unsigned char) ~bits;
 
-        for (plane = 0; plane < 4; ++plane) {
-            unsigned char value = 0;
-            if ((fg >> plane) & 1) {
-                value = (unsigned char) (value | bits);
-            }
-            if ((bg >> plane) & 1) {
-                value = (unsigned char) (value | (unsigned char) ~bits);
-            }
-            target[plane * 2] = value;
-        }
+        target[0] = (unsigned char) ((bits & f0) | (rest & b0));
+        target[2] = (unsigned char) ((bits & f1) | (rest & b1));
+        target[4] = (unsigned char) ((bits & f2) | (rest & b2));
+        target[6] = (unsigned char) ((bits & f3) | (rest & b3));
+        target += ROW_BYTES;
     }
 }
 
 static void draw_cell_2x(unsigned char *buffer, int x, int y, const unsigned char *glyph, int fg, int bg) {
-    const int group_offset = (x >> 4) * 8;
+    unsigned short *target = (unsigned short *) (buffer + y * ROW_BYTES + (x >> 4) * 8);
+    const unsigned short f0 = (fg & 1) ? 0xffff : 0, f1 = (fg & 2) ? 0xffff : 0, f2 = (fg & 4) ? 0xffff : 0, f3 = (fg & 8) ? 0xffff : 0;
+    const unsigned short b0 = (bg & 1) ? 0xffff : 0, b1 = (bg & 2) ? 0xffff : 0, b2 = (bg & 4) ? 0xffff : 0, b3 = (bg & 8) ? 0xffff : 0;
     int row;
 
+    if (!wide_ready) {
+        wide_init();
+    }
     for (row = 0; row < 8; ++row) {
-        const unsigned short wide = double_bits(glyph[row]);
-        int copy;
+        const unsigned short wide = wide_table[glyph[row]];
+        const unsigned short rest = (unsigned short) ~wide;
+        const unsigned short v0 = (unsigned short) ((wide & f0) | (rest & b0));
+        const unsigned short v1 = (unsigned short) ((wide & f1) | (rest & b1));
+        const unsigned short v2 = (unsigned short) ((wide & f2) | (rest & b2));
+        const unsigned short v3 = (unsigned short) ((wide & f3) | (rest & b3));
 
-        for (copy = 0; copy < 2; ++copy) {
-            unsigned short *target = (unsigned short *) (buffer + (y + row * 2 + copy) * ROW_BYTES + group_offset);
-            int plane;
-
-            for (plane = 0; plane < 4; ++plane) {
-                unsigned short value = 0;
-                if ((fg >> plane) & 1) {
-                    value = (unsigned short) (value | wide);
-                }
-                if ((bg >> plane) & 1) {
-                    value = (unsigned short) (value | (unsigned short) ~wide);
-                }
-                target[plane] = value;
-            }
-        }
+        target[0] = v0;
+        target[1] = v1;
+        target[2] = v2;
+        target[3] = v3;
+        target += ROW_BYTES / 2;
+        target[0] = v0;
+        target[1] = v1;
+        target[2] = v2;
+        target[3] = v3;
+        target += ROW_BYTES / 2;
     }
 }
 

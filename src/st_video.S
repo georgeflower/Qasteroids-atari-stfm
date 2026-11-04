@@ -114,30 +114,46 @@ crloop:
 	moveq	#0,%d3
 	moveq	#0,%d4
 	moveq	#0,%d5
-	cmp.w	#3,%d6
-	bhi.s	crwide
+	cmp.w	#6,%d6
+	bhi.w	crwide
 	add.w	%d6,%d6
 	move.w	crtable(%pc,%d6.w),%d6
 	jmp	crtable(%pc,%d6.w)
 crtable:
-	.word	cr1-crtable, cr2-crtable, cr3-crtable, cr4-crtable
+	.word	cr1-crtable, cr2-crtable, cr3-crtable, cr4-crtable, cr5-crtable, cr6-crtable, cr7-crtable
 cr1:	movem.l	%d0-%d1,(%a0)
 	lea	160(%a0),%a0
 	dbra	%d7,cr1
-	bra.s	crnext
+	bra.w	crnext
 cr2:	movem.l	%d0-%d3,(%a0)
 	lea	160(%a0),%a0
 	dbra	%d7,cr2
-	bra.s	crnext
+	bra.w	crnext
 cr3:	movem.l	%d0-%d5,(%a0)
 	lea	160(%a0),%a0
 	dbra	%d7,cr3
-	bra.s	crnext
+	bra.w	crnext
 cr4:	movem.l	%d0-%d5,(%a0)
 	movem.l	%d0-%d1,24(%a0)
 	lea	160(%a0),%a0
 	dbra	%d7,cr4
-	bra.s	crnext
+	bra.w	crnext
+cr5:	movem.l	%d0-%d5,(%a0)
+	movem.l	%d0-%d3,24(%a0)
+	lea	160(%a0),%a0
+	dbra	%d7,cr5
+	bra.w	crnext
+cr6:	movem.l	%d0-%d5,(%a0)
+	movem.l	%d0-%d5,24(%a0)
+	lea	160(%a0),%a0
+	dbra	%d7,cr6
+	bra.w	crnext
+cr7:	movem.l	%d0-%d5,(%a0)
+	movem.l	%d0-%d5,24(%a0)
+	movem.l	%d0-%d3,48(%a0)
+	lea	160(%a0),%a0
+	dbra	%d7,cr7
+	bra.w	crnext
 crwide:	move.l	#160,%a1			| more than four groups: generic loop
 	move.l	%d6,%d3
 	addq.l	#1,%d3

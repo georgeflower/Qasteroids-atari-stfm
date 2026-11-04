@@ -1107,6 +1107,8 @@ static int pace_message_frames;
 static int pace_f1_was_down;
 static int pace_f2_was_down;
 static int pace_stats_on;
+static char pace_stats_text[22];
+static int pace_stats_redraw;
 static int pace_stats_clear;
 
 static void put_number(char *out, unsigned long value, int width) {
@@ -1171,6 +1173,7 @@ static void pace_poll_key(void) {
     if (st_key_state[0x3cu] && !pace_f2_was_down) {   /* F2: work time and frame rate */
         pace_stats_on = !pace_stats_on;
         pace_stats_clear = 2;
+        pace_stats_text[0] = 0;
     }
     pace_f2_was_down = st_key_state[0x3cu] != 0;
 }
@@ -1181,7 +1184,15 @@ static void pace_draw_message(void) {
 
         put_number(line + 5, pace_average_ms, 3);
         put_number(line + 17, (unsigned long) (50 / pace_cadence), 2);
-        st_text_draw(draw_buffer, 8, 192, line, 2, GAME_COLOR_FRAME, 1);
+        /* only when the numbers change (twice, for both screen buffers): 21 characters every frame is slow */
+        if (memcmp(line, pace_stats_text, sizeof(line)) != 0) {
+            memcpy(pace_stats_text, line, sizeof(line));
+            pace_stats_redraw = 2;
+        }
+        if (pace_stats_redraw > 0) {
+            --pace_stats_redraw;
+            st_text_draw(draw_buffer, 8, 192, line, 2, GAME_COLOR_FRAME, 1);
+        }
         return;
     }
     if (pace_stats_clear > 0) {
