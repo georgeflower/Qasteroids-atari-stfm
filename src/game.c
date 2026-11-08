@@ -3341,7 +3341,7 @@ static void draw_title_screen(const GameState *state, const GameRenderer *render
     draw_settings_line(state, renderer);
     put_centered(state, renderer, 148, "A/D OR ARROWS TURN  W OR UP THRUST", GAME_COLOR_GREY, 1);
     put_centered(state, renderer, 158, "SPACE FIRE  H HYPERSPACE  P PAUSE", GAME_COLOR_GREY, 1);
-    put_centered(state, renderer, 168, "JOYSTICK PORT 1 OR 2   ESC QUIT", GAME_COLOR_GREY, 1);
+    put_centered(state, renderer, 168, "JOYSTICK PORT 1   ESC QUIT", GAME_COLOR_GREY, 1);
 }
 
 /* The logo: each letter rides its own sine wave and cycles through the palette, with sparkles orbiting it.
